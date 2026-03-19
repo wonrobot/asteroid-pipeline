@@ -108,3 +108,9 @@ class PipelineConfig:
 
 # Default instance — import this directly if you don't need customisation
 DEFAULT_CONFIG = PipelineConfig()
+
+
+
+# ── Geometry correction (JPL Horizons) ────────────────────────────────────
+use_geometry: bool  = False
+hg_slope_G:   float = 0.15
