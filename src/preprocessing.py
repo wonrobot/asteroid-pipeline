@@ -95,6 +95,14 @@ def preprocess(
     provid = df_obj["provid"].iloc[0] if "provid" in df_obj.columns else "unknown"
     df     = df_obj.copy().sort_values("mjd").reset_index(drop=True)
 
+    # 0. Normalize band names so r/g/i and Lr/Lg/Li merge correctly
+    BAND_REMAP = {'g': 'Lg', 'r': 'Lr', 'i': 'Li', 'z': 'Lz', 'y': 'Ly', 'u': 'Lu'}
+    df['band'] = df['band'].replace(BAND_REMAP)
+
+    # 0. Normalize band names so r/g/i and Lr/Lg/Li merge correctly
+    BAND_REMAP = {'g': 'Lg', 'r': 'Lr', 'i': 'Li', 'z': 'Lz', 'y': 'Ly', 'u': 'Lu'}
+    df['band'] = df['band'].replace(BAND_REMAP)
+
     # 1. Per-band median offset correction
     df = _apply_band_offsets(df, config)
 
