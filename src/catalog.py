@@ -82,6 +82,7 @@ def result_to_row(
     t1result: Tier1Result,
     t2result: Optional[Tier2Result] = None,
     t3result: Optional[Tier3Result] = None,
+    char      = None,   # DataCharacterisation | None
 ) -> dict:
     """
     Convert pipeline results for one asteroid into a catalog row dict.
@@ -154,6 +155,28 @@ def result_to_row(
     for col in CATALOG_COLUMNS:
         if col not in row:
             row[col] = np.nan
+
+    # ── Data characterisation fields ─────────────────────────────────────────
+    if char is not None:
+        row["regime"]               = char.regime
+        row["n_nights"]             = char.n_nights
+        row["n_seasons"]            = char.n_seasons
+        row["obs_per_night_median"] = char.obs_per_night_median
+        row["night_duration_hr"]    = char.night_duration_hr
+        row["reliability_ceiling"]  = char.reliability_ceiling
+        row["recommended_methods"]  = ",".join(char.recommended_methods)
+        row["lcdb_period_hr"]       = char.lcdb_period
+        row["lcdb_u_code"]          = char.lcdb_u_code
+    else:
+        row["regime"]               = "unknown"
+        row["n_nights"]             = None
+        row["n_seasons"]            = None
+        row["obs_per_night_median"] = None
+        row["night_duration_hr"]    = None
+        row["reliability_ceiling"]  = "unknown"
+        row["recommended_methods"]  = None
+        row["lcdb_period_hr"]       = None
+        row["lcdb_u_code"]          = None
 
     return row
 

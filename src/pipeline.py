@@ -41,6 +41,7 @@ from preprocessing import preprocess
 from tier1 import run_tier1
 from tier2 import run_tier2
 from tier3 import run_tier3
+from characterise import characterise, DataCharacterisation
 from catalog import (
     init_catalog, result_to_row, append_result,
     save_catalog, catalog_summary
@@ -160,6 +161,13 @@ def run_single_asteroid(
     provid = df_obj["provid"].iloc[0] if "provid" in df_obj.columns else "unknown"
     logger.debug(f"Processing: {provid}")
 
+    # ── Data characterisation ─────────────────────────────────────────────────
+    char = characterise(df_obj)
+    logger.debug(
+        f"{provid}: regime={char.regime} ceiling={char.reliability_ceiling} "
+        f"nights={char.n_nights} baseline={char.baseline_days:.1f}d"
+    )
+
     # ── Preprocessing ─────────────────────────────────────────────────────────
     data = preprocess(df_obj, config)
 
@@ -167,22 +175,22 @@ def run_single_asteroid(
     t1 = run_tier1(data, config)
 
     if not t1.passes:
-        return result_to_row(data, t1)
+        return result_to_row(data, t1, char=char)
 
     # ── Tier 2 ────────────────────────────────────────────────────────────────
     t2 = run_tier2(data, t1, config)
 
     if t2.passes:
         # Methods agreed — publish confirmed period
-        return result_to_row(data, t1, t2)
+        return result_to_row(data, t1, t2, char=char)
 
     if not t2.to_tier3:
         # Signal not significant and methods disagree — archive
-        return result_to_row(data, t1, t2)
+        return result_to_row(data, t1, t2, char=char)
 
     # ── Tier 3 ────────────────────────────────────────────────────────────────
     t3 = run_tier3(data, t2, config)
-    return result_to_row(data, t1, t2, t3)
+    return result_to_row(data, t1, t2, t3, char=char)
 
 
 # ── Logging setup ─────────────────────────────────────────────────────────────
