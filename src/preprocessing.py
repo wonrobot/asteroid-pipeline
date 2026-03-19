@@ -127,12 +127,7 @@ def preprocess(
     t_hrs = (df["mjd"].values - t0) * 24.0
     dy    = df["rmsmag"].values
 
-    # ── Step 3: Multiband path — geometry-corrected, NO band offsets ──────────
-    # MBLS receives this. It fits per-band means internally, so pre-subtracting
-    # offsets would discard the inter-band colour information it exploits.
-    y_multiband = df[mag_src_col].values.copy()
-
-    # ── Step 4: Merged path — band offsets then detrend ───────────────────────
+    # ── Step 3: Merged path — band offsets then detrend ───────────────────────
     # GLS, MHAOV, and CE need a single combined series.
     df = _apply_band_offsets(df, config, src_col=mag_src_col)
     y  = df["mag_corr"].values
@@ -143,6 +138,16 @@ def preprocess(
         poly_coeffs = np.array([0.0, 0.0, float(np.mean(y))])
     else:
         y_dt, poly_coeffs = _geometry_detrend(t_hrs, y)
+
+    # ── Step 4: Multiband path — trend removed, band offsets kept ─────────────
+    # MBLS fits per-band intercepts internally so colour offsets are fine.
+    # But it has no trend model — remove the same slow trend as the merged path.
+    # poly_coeffs was fit to band-offset-corrected data (mean ~0), so we must
+    # also subtract the global mean of raw mag to centre around zero.
+    # Per-band colour offsets (~0.3 mag between g/r/i) are preserved for MBLS.
+    global_mean = float(df[mag_src_col].mean())
+    trend       = np.polyval(poly_coeffs, t_hrs)
+    y_multiband = df[mag_src_col].values.copy() - global_mean - trend
 
     # ── Step 5: Quality metrics ───────────────────────────────────────────────
     amplitude = float(y_dt.max() - y_dt.min())
