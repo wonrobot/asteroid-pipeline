@@ -11,8 +11,15 @@ Steps
                                      Falls back to quadratic polynomial if
                                      use_geometry=False or Horizons fails.
 2. Per-band median offset          — removes colour differences between bands
+                                     (only for merged series used by GLS/MHAOV/CE)
 3. Quality assessment              — SNR, amplitude, per-band counts
 4. MJD → hours conversion         — all period methods work in hours
+
+Two data paths are maintained:
+  - Merged (y_dt):      band-offset-corrected + detrended → GLS, MHAOV, CE
+  - Multiband (y_multiband): geometry-corrected only, raw band labels → MBLS
+    MBLS fits per-band means internally — pre-applying offsets discards the
+    inter-band colour information it was designed to exploit.
 """
 
 import logging
@@ -32,12 +39,30 @@ logger = logging.getLogger(__name__)
 class PreparedData:
     """
     Output of preprocess(). Everything downstream needs is here.
+
+    Two parallel data paths:
+    ┌─────────────────────────────────────────────────────────────┐
+    │  Merged path  (t_hrs, y_dt, dy, bands)                      │
+    │  → band offsets applied, geometry detrended                 │
+    │  → used by: GLS, MHAOV, Conditional Entropy                 │
+    ├─────────────────────────────────────────────────────────────┤
+    │  Multiband path  (t_hrs, y_multiband, dy, bands)            │
+    │  → geometry-corrected only, NO band offsets                 │
+    │  → used by: MBLS (fits per-band means internally)           │
+    └─────────────────────────────────────────────────────────────┘
+    t_hrs and dy are shared between both paths.
     """
     provid:           str
-    t_hrs:            np.ndarray
-    y_dt:             np.ndarray
-    dy:               np.ndarray
-    bands:            np.ndarray
+    # ── Shared ────────────────────────────────────────────────────
+    t_hrs:            np.ndarray   # time in hours from first obs (N,)
+    dy:               np.ndarray   # photometric uncertainties (N,)
+    bands:            np.ndarray   # band label per observation (N,)
+    # ── Merged path (GLS / MHAOV / CE) ───────────────────────────
+    y_dt:             np.ndarray   # band-offset-corrected + detrended (N,)
+    poly_coeffs:      np.ndarray   # detrend polynomial coefficients
+    # ── Multiband path (MBLS) ─────────────────────────────────────
+    y_multiband:      np.ndarray   # geometry-corrected mag, no band offsets (N,)
+    # ── Metadata ──────────────────────────────────────────────────
     df:               pd.DataFrame
     n_obs:            int
     n_bands:          int
@@ -45,8 +70,7 @@ class PreparedData:
     amplitude:        float
     snr:              float
     band_counts:      Dict[str, int]
-    poly_coeffs:      np.ndarray
-    geometry_applied: bool          # NEW — True if Horizons data was used
+    geometry_applied: bool          # True if JPL Horizons data was used
 
 
 # ── Main function ─────────────────────────────────────────────────────────────
@@ -55,6 +79,21 @@ def preprocess(
     df_obj: pd.DataFrame,
     config: PipelineConfig = DEFAULT_CONFIG,
 ) -> PreparedData:
+    """
+    Full preprocessing pipeline for a single asteroid.
+
+    Parameters
+    ----------
+    df_obj : pd.DataFrame
+        Observations for one asteroid (from ingestion.load_single_object).
+        Required columns: mjd, band, mag, rmsmag
+
+    config : PipelineConfig
+
+    Returns
+    -------
+    PreparedData — all arrays ready for period analysis
+    """
     provid = df_obj["provid"].iloc[0] if "provid" in df_obj.columns else "unknown"
     df     = df_obj.copy().sort_values("mjd").reset_index(drop=True)
 
@@ -62,9 +101,11 @@ def preprocess(
     BAND_REMAP = {'g': 'Lg', 'r': 'Lr', 'i': 'Li', 'z': 'Lz', 'y': 'Ly', 'u': 'Lu'}
     df['band'] = df['band'].replace(BAND_REMAP)
 
-    # ── Step 1: Geometry correction ──────────────────────────────────────────
+    # ── Step 1: Geometry correction (optional) ────────────────────────────────
+    # Applies reduced magnitude + HG phase correction if use_geometry=True.
+    # On failure, falls back to the quadratic polynomial detrend below.
     geometry_applied = False
-    mag_src_col = "mag"   # which column feeds into band offsets
+    mag_src_col = "mag"   # column that feeds downstream steps
 
     if config.data.use_geometry:
         try:
@@ -81,19 +122,24 @@ def preprocess(
                 f"— falling back to quadratic detrend"
             )
 
-    # ── Step 2: Per-band median offset correction ─────────────────────────────
-    df = _apply_band_offsets(df, config, src_col=mag_src_col)
-
-    # ── Step 3: Build time array in hours ─────────────────────────────────────
+    # ── Step 2: Build time array ──────────────────────────────────────────────
     t0    = df["mjd"].min()
     t_hrs = (df["mjd"].values - t0) * 24.0
-    y     = df["mag_corr"].values
     dy    = df["rmsmag"].values
 
-    # ── Step 4: Geometry detrend (only if Horizons correction wasn't applied) ─
+    # ── Step 3: Multiband path — geometry-corrected, NO band offsets ──────────
+    # MBLS receives this. It fits per-band means internally, so pre-subtracting
+    # offsets would discard the inter-band colour information it exploits.
+    y_multiband = df[mag_src_col].values.copy()
+
+    # ── Step 4: Merged path — band offsets then detrend ───────────────────────
+    # GLS, MHAOV, and CE need a single combined series.
+    df = _apply_band_offsets(df, config, src_col=mag_src_col)
+    y  = df["mag_corr"].values
+
     if geometry_applied:
-        # Physical correction already applied — just mean-centre
-        y_dt       = y - np.mean(y)
+        # Physical correction already handles the slow trend — just mean-centre
+        y_dt        = y - np.mean(y)
         poly_coeffs = np.array([0.0, 0.0, float(np.mean(y))])
     else:
         y_dt, poly_coeffs = _geometry_detrend(t_hrs, y)
@@ -115,9 +161,11 @@ def preprocess(
     return PreparedData(
         provid            = provid,
         t_hrs             = t_hrs,
-        y_dt              = y_dt,
         dy                = dy,
         bands             = df["band"].values,
+        y_dt              = y_dt,
+        poly_coeffs       = poly_coeffs,
+        y_multiband       = y_multiband,
         df                = df,
         n_obs             = len(df),
         n_bands           = n_bands,
@@ -125,7 +173,6 @@ def preprocess(
         amplitude         = amplitude,
         snr               = snr,
         band_counts       = band_counts,
-        poly_coeffs       = poly_coeffs,
         geometry_applied  = geometry_applied,
     )
 
@@ -133,6 +180,10 @@ def preprocess(
 # ── SNR and quality ───────────────────────────────────────────────────────────
 
 def compute_snr(y_dt: np.ndarray, dy: np.ndarray) -> float:
+    """
+    Signal-to-noise ratio: peak-to-peak amplitude / median uncertainty.
+    Values above ~3 indicate meaningful period detection is possible.
+    """
     amplitude = y_dt.max() - y_dt.min()
     noise     = float(np.median(dy))
     return float(amplitude / noise) if noise > 0 else 0.0
@@ -142,6 +193,10 @@ def quality_report(
     df_obj: pd.DataFrame,
     config: PipelineConfig = DEFAULT_CONFIG,
 ) -> Dict:
+    """
+    Quick quality assessment without full preprocessing.
+    Used by Tier 1 to decide whether to proceed.
+    """
     n_obs         = len(df_obj)
     n_bands       = df_obj["band"].nunique()
     baseline_days = df_obj["mjd"].max() - df_obj["mjd"].min()
@@ -168,13 +223,17 @@ def quality_report(
 # ── Internal helpers ──────────────────────────────────────────────────────────
 
 def _apply_band_offsets(
-    df: pd.DataFrame,
-    config: PipelineConfig,
-    src_col: str = "mag",          # NEW — use mag_phase_corr when geometry applied
+    df:      pd.DataFrame,
+    config:  PipelineConfig,
+    src_col: str = "mag",
 ) -> pd.DataFrame:
     """
-    Subtract the per-band median magnitude to merge multi-band data.
-    Reads from src_col, writes to mag_corr.
+    Subtract the per-band median magnitude so all bands sit at zero.
+
+    This is only applied to the merged series (y_dt) used by GLS/MHAOV/CE.
+    MBLS receives y_multiband directly, without this correction.
+
+    Reads from src_col, writes result to mag_corr.
     """
     df["mag_corr"] = np.nan
     for band in df["band"].unique():
@@ -189,10 +248,14 @@ def _apply_band_offsets(
     return df
 
 
-def _geometry_detrend(t_hrs: np.ndarray, y: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+def _geometry_detrend(
+    t_hrs: np.ndarray,
+    y:     np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray]:
     """
     Quadratic polynomial proxy for geometry correction.
     Used only when use_geometry=False or Horizons is unavailable.
+    Only applied to the merged series — MBLS does not use this.
     """
     if len(t_hrs) < 3:
         return y.copy(), np.array([0.0, 0.0, np.mean(y)])
