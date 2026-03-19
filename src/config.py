@@ -30,9 +30,22 @@ class DataConfig:
     })
 
     # Quality cuts
-    rmsmag_max:   float = 0.21   # 99th percentile — reject noisy observations
-    min_obs_total: int  = 20     # minimum observations across all bands
-    min_obs_band:  int  = 5      # minimum per band to use that band
+    rmsmag_max:    float = 0.21  # 99th percentile — reject noisy observations
+    min_obs_total: int   = 20    # minimum observations across all bands
+    min_obs_band:  int   = 5     # minimum per band to use that band
+
+    # ── Geometry correction (JPL Horizons) ────────────────────────────────────
+    # When True, fetches r_au, delta_au, phase_angle from JPL Horizons and
+    # applies reduced magnitude + HG phase correction instead of the quadratic
+    # polynomial detrend. Adds ~1-2s per asteroid — keep False for bulk runs,
+    # set True for validation targets or smaller focused runs.
+    use_geometry: bool  = False
+
+    # HG phase function slope parameter (Bowell et al. 1989).
+    # S-type asteroids (most NEAs): 0.15
+    # C-type (dark, carbonaceous):  0.10
+    # High-albedo (E-type, V-type): 0.25
+    hg_slope_G:   float = 0.15
 
 
 # ── Period search ─────────────────────────────────────────────────────────────
@@ -41,22 +54,19 @@ class DataConfig:
 class PeriodConfig:
     """Period search grid and algorithm settings."""
 
-    period_min_hr:  float = 0.5    # shortest period to test (hours)
-    period_max_hr:  float = 24.0   # longest period to test (hours)
-    n_grid_coarse:  int   = 8_000  # Tier 1 grid points
-    n_grid_fine:    int   = 15_000 # Tier 2/3 grid points
-    samples_per_peak: int = 20     # oversampling for astropy autopower
+    period_min_hr:  float = 0.5
+    period_max_hr:  float = 24.0
+    n_grid_coarse:  int   = 8_000
+    n_grid_fine:    int   = 15_000
+    samples_per_peak: int = 20
 
-    # Fourier / MHAOV harmonics
-    mhaov_nh: int = 2   # number of harmonics for MHAOV (2 = double hump)
-    mbls_nterms_t1: int = 1  # Tier 1 MBLS terms
-    mbls_nterms_t2: int = 2  # Tier 2 MBLS terms
+    mhaov_nh:       int = 2
+    mbls_nterms_t1: int = 1
+    mbls_nterms_t2: int = 2
 
-    # Conditional entropy bins
     ce_n_phase: int = 10
     ce_n_mag:   int = 5
 
-    # CLEAN algorithm
     clean_gain:  float = 0.1
     clean_niter: int   = 200
 
@@ -67,17 +77,12 @@ class PeriodConfig:
 class TierConfig:
     """Decision thresholds for each pipeline tier."""
 
-    # Tier 1 → Tier 2 gate
-    snr_threshold: float = 3.0   # amplitude / median(rmsmag) must exceed this
-    min_obs:       int   = 20    # minimum observations to attempt Tier 2
-
-    # Tier 2 → publish / Tier 3 gate
-    agreement_tol:      float = 0.05   # fractional period agreement (5%)
-    mhaov_pval_thresh:  float = 0.001  # MHAOV F-test p-value threshold
-
-    # Tier 3 → publish tentative / flag for follow-up
-    bayesian_ci_thresh: float = 0.5   # max 95% CI width (hours)
-    clean_peak_ratio:   float = 3.0   # CLEAN top peak must be this × 2nd peak
+    snr_threshold:      float = 3.0
+    min_obs:            int   = 20
+    agreement_tol:      float = 0.05
+    mhaov_pval_thresh:  float = 0.001
+    bayesian_ci_thresh: float = 0.5
+    clean_peak_ratio:   float = 3.0
 
 
 # ── Output ────────────────────────────────────────────────────────────────────
@@ -89,7 +94,7 @@ class OutputConfig:
     results_dir:  str  = "results"
     catalog_file: str  = "results/period_catalog.csv"
     log_file:     str  = "results/pipeline.log"
-    save_plots:   bool = False   # set True to save phase-fold plots to disk
+    save_plots:   bool = False
     plots_dir:    str  = "results/plots"
     verbose:      bool = True
 
@@ -108,9 +113,3 @@ class PipelineConfig:
 
 # Default instance — import this directly if you don't need customisation
 DEFAULT_CONFIG = PipelineConfig()
-
-
-
-# ── Geometry correction (JPL Horizons) ────────────────────────────────────
-use_geometry: bool  = False
-hg_slope_G:   float = 0.15
