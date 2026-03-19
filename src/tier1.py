@@ -204,7 +204,7 @@ def mbls_periodogram(
     bands  : band label per observation
     nterms : Fourier terms. 1 = single sinusoid (Tier 1), 2 = double hump (Tier 2)
     """
-    model = LombScargleMultiband(Nterms_base=nterms, Nterms_band=1)
+    model = LombScargleMultiband(Nterms_base=nterms, Nterms_band=0)
     model.fit(t, y, dy, bands)
     return model.periodogram(test_periods)
 
