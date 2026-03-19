@@ -1,0 +1,216 @@
+"""
+catalog.py
+----------
+Stores pipeline results to a CSV catalog and manages output.
+
+Each asteroid gets one row in the catalog with all key fields.
+The catalog is append-safe — it can be updated nightly.
+
+Functions
+---------
+init_catalog(config)                   — create or load existing catalog
+append_result(catalog_df, result)      — add one asteroid to catalog
+save_catalog(catalog_df, config)       — write catalog to disk
+load_catalog(config)                   — read existing catalog
+result_to_row(t1, t2, t3, data)       — convert pipeline results to dict
+"""
+
+import logging
+import os
+from datetime import datetime, timezone
+from typing import Optional
+import numpy as np
+import pandas as pd
+
+from config import PipelineConfig, DEFAULT_CONFIG
+from preprocessing import PreparedData
+from tier1 import Tier1Result
+from tier2 import Tier2Result
+from tier3 import Tier3Result
+
+logger = logging.getLogger(__name__)
+
+# Catalog column order
+CATALOG_COLUMNS = [
+    "provid", "run_timestamp",
+    # Tier 1
+    "t1_passes", "t1_gls_period_hr", "t1_gls_power", "t1_snr", "t1_n_obs",
+    "t1_reject_reason",
+    # Tier 2
+    "t2_passes", "t2_to_tier3",
+    "t2_mhaov_period_hr", "t2_mbls_period_hr", "t2_ce_period_hr",
+    "t2_consensus_period_hr", "t2_F_stat", "t2_p_value",
+    "t2_amplitude_mag", "t2_agreement", "t2_period_spread_pct",
+    # Tier 3
+    "t3_ran", "t3_publish_tentative", "t3_needs_followup",
+    "t3_bayes_period_hr", "t3_clean_period_hr",
+    "t3_ci_lo", "t3_ci_hi", "t3_ci_width",
+    "t3_clean_peak_ratio",
+    # Final adopted values
+    "final_period_hr", "final_period_unc_hr", "reliability",
+    # Metadata
+    "n_bands", "baseline_hr", "bands_used",
+]
+
+
+def init_catalog(config: PipelineConfig = DEFAULT_CONFIG) -> pd.DataFrame:
+    """
+    Load existing catalog or create an empty one.
+
+    Returns
+    -------
+    pd.DataFrame with CATALOG_COLUMNS
+    """
+    os.makedirs(config.output.results_dir, exist_ok=True)
+    path = config.output.catalog_file
+
+    if os.path.exists(path):
+        df = pd.read_csv(path)
+        logger.info(f"Loaded existing catalog: {len(df)} rows from {path}")
+        # Add any new columns that didn't exist in old catalog
+        for col in CATALOG_COLUMNS:
+            if col not in df.columns:
+                df[col] = np.nan
+        return df[CATALOG_COLUMNS]
+
+    logger.info(f"Creating new catalog: {path}")
+    return pd.DataFrame(columns=CATALOG_COLUMNS)
+
+
+def result_to_row(
+    data:     PreparedData,
+    t1result: Tier1Result,
+    t2result: Optional[Tier2Result] = None,
+    t3result: Optional[Tier3Result] = None,
+) -> dict:
+    """
+    Convert pipeline results for one asteroid into a catalog row dict.
+    """
+    row = {
+        "provid":         data.provid,
+        "run_timestamp":  datetime.now(timezone.utc).isoformat(),
+        # Tier 1
+        "t1_passes":      t1result.passes,
+        "t1_gls_period_hr": t1result.best_period_gls,
+        "t1_gls_power":   t1result.gls_power_max,
+        "t1_snr":         t1result.snr,
+        "t1_n_obs":       t1result.n_obs,
+        "t1_reject_reason": t1result.reject_reason,
+        # Metadata
+        "n_bands":        data.n_bands,
+        "baseline_hr":    data.baseline_hr,
+        "bands_used":     ",".join(sorted(data.band_counts.keys())),
+    }
+
+    # Tier 2 fields
+    if t2result is not None:
+        row.update({
+            "t2_passes":            t2result.passes,
+            "t2_to_tier3":          t2result.to_tier3,
+            "t2_mhaov_period_hr":   t2result.best_period_mhaov,
+            "t2_mbls_period_hr":    t2result.best_period_mbls,
+            "t2_ce_period_hr":      t2result.best_period_ce,
+            "t2_consensus_period_hr": t2result.consensus_period,
+            "t2_F_stat":            t2result.F_stat,
+            "t2_p_value":           t2result.p_value,
+            "t2_amplitude_mag":     t2result.amplitude,
+            "t2_agreement":         t2result.agreement,
+            "t2_period_spread_pct": t2result.period_spread_pct,
+        })
+        # If Tier 2 passed (methods agreed), set final values here
+        if t2result.passes:
+            row["final_period_hr"]     = t2result.consensus_period
+            row["final_period_unc_hr"] = t2result.consensus_period * t2result.period_spread_pct
+            row["reliability"]         = "confirmed"
+    else:
+        row.update({k: np.nan for k in CATALOG_COLUMNS
+                    if k.startswith("t2_")})
+
+    # Tier 3 fields
+    if t3result is not None:
+        row.update({
+            "t3_ran":               True,
+            "t3_publish_tentative": t3result.publish_tentative,
+            "t3_needs_followup":    t3result.needs_followup,
+            "t3_bayes_period_hr":   t3result.best_period_bayes,
+            "t3_clean_period_hr":   t3result.best_period_clean,
+            "t3_ci_lo":             t3result.ci_lo,
+            "t3_ci_hi":             t3result.ci_hi,
+            "t3_ci_width":          t3result.ci_width,
+            "t3_clean_peak_ratio":  t3result.clean_peak_ratio,
+        })
+        if t3result.publish_tentative:
+            row["final_period_hr"]     = t3result.final_period
+            row["final_period_unc_hr"] = t3result.final_period_unc
+            row["reliability"]         = "tentative"
+        elif t3result.needs_followup:
+            row["reliability"] = "followup_needed"
+    else:
+        row.update({k: np.nan for k in CATALOG_COLUMNS
+                    if k.startswith("t3_")})
+        row["t3_ran"] = False
+
+    # Fill any missing fields
+    for col in CATALOG_COLUMNS:
+        if col not in row:
+            row[col] = np.nan
+
+    return row
+
+
+def append_result(
+    catalog_df: pd.DataFrame,
+    row:        dict,
+) -> pd.DataFrame:
+    """
+    Append one result row to the catalog DataFrame.
+    If the provid already exists, update the row (upsert).
+    """
+    new_row = pd.DataFrame([{col: row.get(col, np.nan) for col in CATALOG_COLUMNS}])
+
+    if row["provid"] in catalog_df["provid"].values:
+        catalog_df = catalog_df[catalog_df["provid"] != row["provid"]].copy()
+        logger.debug(f"Updating existing catalog entry for {row['provid']}")
+
+    catalog_df = pd.concat([catalog_df, new_row], ignore_index=True)
+    return catalog_df
+
+
+def save_catalog(
+    catalog_df: pd.DataFrame,
+    config:     PipelineConfig = DEFAULT_CONFIG,
+) -> None:
+    """Save catalog DataFrame to CSV."""
+    os.makedirs(config.output.results_dir, exist_ok=True)
+    catalog_df.to_csv(config.output.catalog_file, index=False)
+    logger.info(f"Saved catalog: {len(catalog_df)} rows → {config.output.catalog_file}")
+
+
+def load_catalog(config: PipelineConfig = DEFAULT_CONFIG) -> pd.DataFrame:
+    """Load catalog from CSV."""
+    return pd.read_csv(config.output.catalog_file)
+
+
+def catalog_summary(catalog_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Return a human-readable summary of pipeline outcomes.
+    """
+    total      = len(catalog_df)
+    t1_pass    = catalog_df["t1_passes"].sum()
+    t2_pass    = catalog_df["t2_passes"].sum() if "t2_passes" in catalog_df else 0
+    confirmed  = (catalog_df["reliability"] == "confirmed").sum()
+    tentative  = (catalog_df["reliability"] == "tentative").sum()
+    followup   = (catalog_df["reliability"] == "followup_needed").sum()
+    t1_reject  = total - t1_pass
+
+    summary = pd.DataFrame([
+        {"Stage": "Total processed",          "Count": total},
+        {"Stage": "Tier 1 rejected",          "Count": int(t1_reject)},
+        {"Stage": "Tier 1 passed → Tier 2",   "Count": int(t1_pass)},
+        {"Stage": "Tier 2 agreed → published","Count": int(t2_pass)},
+        {"Stage": "Tier 3 → tentative",       "Count": int(tentative)},
+        {"Stage": "Flagged for follow-up",    "Count": int(followup)},
+        {"Stage": "Published (confirmed)",    "Count": int(confirmed)},
+        {"Stage": "Published (tentative)",    "Count": int(tentative)},
+    ])
+    return summary
