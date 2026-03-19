@@ -7,28 +7,20 @@ Runs three independent methods and checks for agreement.
 Methods
 -------
 1. MHAOV NH=2  — Multi-Harmonic AOV (Schwarzenberg-Czerny 1996)
-                 Fits 2 harmonics via weighted LS, returns F-statistic.
-                 Directly models the double-hump asteroid shape.
-                 Gives real p-values via F(4, N-5) distribution.
+                 Fits 2 harmonics, returns F-statistic with real p-values.
 
 2. MBLS Nterms=2 — Multi-band LS with 2nd harmonic
-                 Exploits multi-band colour information.
+                 Uses raw multiband series (no pre-applied band offsets).
+                 MBLS fits per-band means internally.
 
 3. Conditional Entropy — Graham et al. (2013)
-                 Model-free validator. Measures 2D phase-magnitude
-                 histogram entropy. No assumed shape.
+                 Model-free validator. Lower = better.
 
-Decision: if all three agree within 5% AND p-value < 0.001 → publish.
-Otherwise → Tier 3.
-
-Functions
----------
-run_tier2(data, t1result, config)       — main entry point
-mhaov_periodogram(t, y, dy, tp, nh)    — MHAOV F-statistic over period grid
-mhaov_single(t, y, dy, period, nh)     — MHAOV at one period
-ce_periodogram(t, y, tp)               — Conditional Entropy over period grid
-ce_single(t, y, period)                — CE at one period
-check_agreement(p1, p2, p3, tol)       — check if three periods agree
+Data routing
+------------
+MHAOV → data.y_dt        (merged, band-offset + detrended)
+MBLS  → data.y_multiband (geometry-corrected only, raw band labels)
+CE    → data.y_dt        (merged)
 """
 
 import logging
@@ -68,7 +60,7 @@ class Tier2Result:
     snr              : signal-to-noise ratio
     agreement        : True if all three periods agree within tolerance
     period_spread_pct: max fractional spread between the three periods
-    reject_reason    : if not passes and not to_tier3 (e.g. p-value too high)
+    reject_reason    : explanation if not passes and not to_tier3
     test_periods     : period grid
     mhaov_power      : MHAOV F-statistic array
     mbls_power       : MBLS power array
@@ -103,20 +95,6 @@ def run_tier2(
 ) -> Tier2Result:
     """
     Run Tier 2 period refinement on a single asteroid.
-
-    Uses the Tier 1 period grid or builds a finer one.
-    Runs MHAOV, MBLS, and Conditional Entropy in sequence.
-    Checks agreement and statistical significance.
-
-    Parameters
-    ----------
-    data     : PreparedData from preprocessing.preprocess()
-    t1result : Tier1Result — must have passes=True
-    config   : PipelineConfig
-
-    Returns
-    -------
-    Tier2Result
     """
     if not t1result.passes:
         raise ValueError(f"{data.provid}: Tier 1 did not pass — cannot run Tier 2")
@@ -131,23 +109,25 @@ def run_tier2(
         cfg_p.n_grid_fine,
     )
 
-    # ── 1. MHAOV NH=2 ─────────────────────────────────────────────────────────
+    # ── 1. MHAOV NH=2 — merged series ─────────────────────────────────────────
     logger.debug(f"{data.provid}: running MHAOV NH=2...")
-    mhaov_pow      = mhaov_periodogram(data.t_hrs, data.y_dt, data.dy, test_periods, nh=cfg_p.mhaov_nh)
+    mhaov_pow      = mhaov_periodogram(
+        data.t_hrs, data.y_dt, data.dy, test_periods, nh=cfg_p.mhaov_nh
+    )
     best_idx_mhaov = np.argmax(mhaov_pow)
     best_mhaov     = test_periods[best_idx_mhaov]
     F_best         = float(mhaov_pow[best_idx_mhaov])
 
-    # F-test p-value: F(2*NH, N - 2*NH - 1)
     df_model = 2 * cfg_p.mhaov_nh
     df_resid = data.n_obs - 2 * cfg_p.mhaov_nh - 1
     p_value  = float(1.0 - f_dist.cdf(F_best, df_model, max(df_resid, 1)))
 
-    # ── 2. MBLS Nterms=2 ──────────────────────────────────────────────────────
+    # ── 2. MBLS Nterms=2 — raw multiband series, no pre-applied offsets ───────
+    # MBLS fits per-band means internally as part of the model.
     logger.debug(f"{data.provid}: running MBLS Nterms=2...")
     try:
         mbls_pow  = mbls_periodogram(
-            data.t_hrs, data.y_dt, data.dy, data.bands,
+            data.t_hrs, data.y_multiband, data.dy, data.bands,
             test_periods, nterms=cfg_p.mbls_nterms_t2
         )
         best_mbls = test_periods[np.argmax(mbls_pow)]
@@ -156,11 +136,13 @@ def run_tier2(
         mbls_pow  = mhaov_pow.copy()
         best_mbls = best_mhaov
 
-    # ── 3. Conditional Entropy ────────────────────────────────────────────────
+    # ── 3. Conditional Entropy — merged series ────────────────────────────────
     logger.debug(f"{data.provid}: running Conditional Entropy...")
-    ce_scores = ce_periodogram(data.t_hrs, data.y_dt, test_periods,
-                               n_phase=cfg_p.ce_n_phase, n_mag=cfg_p.ce_n_mag)
-    best_ce   = test_periods[np.argmin(ce_scores)]
+    ce_scores = ce_periodogram(
+        data.t_hrs, data.y_dt, test_periods,
+        n_phase=cfg_p.ce_n_phase, n_mag=cfg_p.ce_n_mag
+    )
+    best_ce = test_periods[np.argmin(ce_scores)]
 
     # ── Agreement check ───────────────────────────────────────────────────────
     agrees, spread_pct = check_agreement(best_mhaov, best_mbls, best_ce, cfg_t.agreement_tol)
@@ -173,7 +155,6 @@ def run_tier2(
     )
 
     # ── Decision ──────────────────────────────────────────────────────────────
-    # Check p-value significance regardless of agreement
     if p_value >= cfg_t.mhaov_pval_thresh and not agrees:
         return Tier2Result(
             provid=data.provid, passes=False, to_tier3=False,
@@ -188,7 +169,6 @@ def run_tier2(
         )
 
     if agrees and p_value < cfg_t.mhaov_pval_thresh:
-        # All methods agree and signal is significant — publish
         return Tier2Result(
             provid=data.provid, passes=True, to_tier3=False,
             best_period_mhaov=best_mhaov, best_period_mbls=best_mbls,
@@ -201,7 +181,7 @@ def run_tier2(
             mbls_power=mbls_pow, ce_scores=ce_scores,
         )
 
-    # Methods disagree or marginal — escalate to Tier 3
+    # Disagree or marginal — escalate to Tier 3
     return Tier2Result(
         provid=data.provid, passes=False, to_tier3=True,
         best_period_mhaov=best_mhaov, best_period_mbls=best_mbls,
@@ -226,21 +206,12 @@ def mhaov_single(
 ) -> float:
     """
     Multi-Harmonic AOV F-statistic at a single trial period.
-
-    Schwarzenberg-Czerny (1996). Fits NH harmonics via weighted LS,
-    partitions variance into model vs residual, returns F-statistic.
-
-    F = (SS_model / df_model) / (SS_residual / df_residual)
-    where df_model = 2*NH, df_residual = N - 2*NH - 1
-
-    Higher F means stronger periodic signal at this period.
-    p-value from F(df_model, df_residual) distribution.
+    Schwarzenberg-Czerny (1996).
     """
     w  = 1.0 / dy**2
     N  = len(t)
     ph = 2.0 * np.pi * t / period
 
-    # Design matrix: [1, cos(ph), sin(ph), cos(2ph), sin(2ph), ...]
     cols = [np.ones(N)]
     for k in range(1, nh + 1):
         cols.append(np.cos(k * ph))
@@ -285,13 +256,7 @@ def ce_single(
 ) -> float:
     """
     Conditional Entropy H(magnitude | phase) at a single trial period.
-
-    Graham et al. (2013) — developed specifically for LSST survey data.
-    Uses a 2D histogram of (phase, magnitude). True period produces
-    a structured lightcurve → low entropy. Wrong period → random
-    scatter → high entropy.
-
-    Lower values are better (unlike power-based methods).
+    Graham et al. (2013). Lower = better (true period → structured lightcurve).
     """
     phase  = (t % period) / period
     y_norm = (y - y.min()) / (y.max() - y.min() + 1e-12)
@@ -323,27 +288,14 @@ def ce_periodogram(
 # ── Agreement check ───────────────────────────────────────────────────────────
 
 def check_agreement(
-    p1: float,
-    p2: float,
-    p3: float,
+    p1:  float,
+    p2:  float,
+    p3:  float,
     tol: float = 0.05,
 ) -> Tuple[bool, float]:
     """
     Check whether three period estimates agree within a fractional tolerance.
-
-    Handles harmonic relationships: checks if any pair of periods agrees
-    directly OR if one is twice the other (P vs P/2 ambiguity).
-
-    Parameters
-    ----------
-    p1, p2, p3 : period estimates (same units)
-    tol        : fractional tolerance e.g. 0.05 = 5%
-
-    Returns
-    -------
-    (agrees, spread_pct)
-    agrees     : True if all three are within tol of their median
-    spread_pct : max fractional deviation from median
+    Returns (agrees, spread_pct).
     """
     periods    = np.array([p1, p2, p3])
     median_p   = np.median(periods)
