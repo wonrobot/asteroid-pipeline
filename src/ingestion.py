@@ -74,7 +74,8 @@ def load_from_bigquery(
     if date_end:
         conditions.append(f"obstime <= '{date_end}'")
 
-    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    conditions.append("provid IS NOT NULL")
+    where = f"WHERE {' AND '.join(conditions)}"
     lim   = f"LIMIT {limit}" if limit else ""
 
     query = f"""
