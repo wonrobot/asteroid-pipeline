@@ -89,16 +89,37 @@ def run_tier1(
                        f"SNR={data.snr:.2f} < threshold={cfg_t.snr_threshold}")
 
     # ── Period grid ───────────────────────────────────────────────────────────
-    # Tier 1 grid — full range from Nyquist floor to baseline
-    # Cap at 20k for fast rotators (p_min < 0.5hr), 5k for normal objects
-    p_min_t1 = data.period_min_hr
-    p_max_t1 = min(cfg_p.period_max_hr, data.baseline_hr)
-    n_t1     = max(cfg_p.n_grid_coarse,
-                   int(5 * data.baseline_hr * (1.0/p_min_t1 - 1.0/p_max_t1)))
-    n_t1     = min(n_t1, 20_000 if p_min_t1 < 0.5 else 5_000)
-    test_periods = np.linspace(p_min_t1, p_max_t1, n_t1)
+    # Tier 1 grid — two-pass strategy for speed
+    # Pass 1: coarse search from 0.5hr floor (2000 pts, always fast ~1s)
+    # Pass 2: only if coarse power is low (possible fast rotator hiding
+    #         below 0.5hr), expand to Nyquist floor and search again.
+    #         This catches MG56 (0.264hr), MM81 (1.1hr), etc.
+    p_max_t1    = min(cfg_p.period_max_hr, data.baseline_hr)
+    FAST_THRESH = 0.5  # hr
+
+    # Pass 1: coarse grid from 0.5hr (fast for all objects)
+    p_min_coarse   = max(data.period_min_hr, FAST_THRESH)
+    test_periods   = np.linspace(p_min_coarse, p_max_t1, cfg_p.n_grid_coarse)
+    gls_pow_coarse = gls_periodogram(data.t_hrs, data.y_dt, data.dy, test_periods)
+    best_coarse    = test_periods[np.argmax(gls_pow_coarse)]
+    max_pow_coarse = float(gls_pow_coarse.max())
+
+    # Pass 2: expand to Nyquist floor if:
+    #   (a) coarse power is weak (true period may be below 0.5hr), OR
+    #   (b) best coarse period is near the 0.5hr boundary
+    #   AND the data actually supports sub-0.5hr detection
+    near_boundary  = best_coarse < FAST_THRESH * 1.5
+    weak_power     = max_pow_coarse < 0.15  # low GLS power = may be missing fast signal
+    can_search_fast = data.period_min_hr < FAST_THRESH
+    if (near_boundary or weak_power) and can_search_fast:
+        n_fast       = min(20_000, max(cfg_p.n_grid_coarse,
+                           int(5 * data.baseline_hr
+                               * (1.0/data.period_min_hr - 1.0/p_max_t1))))
+        test_periods = np.linspace(data.period_min_hr, p_max_t1, n_fast)
+    # else: keep coarse test_periods — normal rotator, no expansion needed
 
     # ── GLS — uses merged, band-offset-corrected + detrended series ───────────
+    # Run GLS on final test_periods (pass 1 coarse or pass 2 expanded)
     gls_pow  = gls_periodogram(data.t_hrs, data.y_dt, data.dy, test_periods)
     best_gls = test_periods[np.argmax(gls_pow)]
     gls_max  = float(gls_pow.max())
