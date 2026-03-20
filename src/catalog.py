@@ -125,9 +125,6 @@ def result_to_row(
             row["final_period_hr"]     = t2result.consensus_period
             row["final_period_unc_hr"] = t2result.consensus_period * t2result.period_spread_pct
             row["reliability"]         = "confirmed"
-            row["r_code"]              = rel.r_code if rel else None
-            row["adopted_period_hr"]   = rel.period_hr if rel else np.nan
-            row["period_unc_hr"]       = rel.period_unc_hr if rel else np.nan
     else:
         row.update({k: np.nan for k in CATALOG_COLUMNS
                     if k.startswith("t2_")})
@@ -149,11 +146,8 @@ def result_to_row(
             row["final_period_hr"]     = t3result.final_period
             row["final_period_unc_hr"] = t3result.final_period_unc
             row["reliability"]         = "tentative"
-        row["r_code"]              = rel.r_code if rel else None
-        row["adopted_period_hr"]   = rel.period_hr if rel else np.nan
-        row["period_unc_hr"]       = rel.period_unc_hr if rel else np.nan
         elif t3result.needs_followup:
-            row["reliability"] = "followup_needed"
+            row["reliability"]         = "followup_needed"
         row["r_code"]              = rel.r_code if rel else None
         row["adopted_period_hr"]   = rel.period_hr if rel else np.nan
         row["period_unc_hr"]       = rel.period_unc_hr if rel else np.nan
