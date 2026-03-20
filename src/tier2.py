@@ -109,14 +109,20 @@ def run_tier2(
         cfg_p.n_grid_fine,
     )
 
-    # ── 1. MHAOV NH=2 — merged series ─────────────────────────────────────────
-    logger.debug(f"{data.provid}: running MHAOV NH=2...")
-    mhaov_pow      = mhaov_periodogram(
-        data.t_hrs, data.y_dt, data.dy, test_periods, nh=cfg_p.mhaov_nh
+    # ── 1. MHAOV adaptive NH — merged series ──────────────────────────────────
+    # Runs NH=2 across full grid, then tests NH=3,4 at top candidate peaks
+    # via F-test. Accepts higher order only if significantly better (p<0.10).
+    # This handles asymmetric lightcurves that fixed NH=2 underfits.
+    logger.debug(f"{data.provid}: running MHAOV adaptive NH=2-4...")
+    mhaov_pow, best_mhaov, F_best, best_nh = mhaov_periodogram_adaptive(
+        data.t_hrs, data.y_dt, data.dy, test_periods,
+        nh_min=cfg_p.mhaov_nh, nh_max=4, n_top_peaks=10, f_pval_thresh=0.10,
     )
-    best_idx_mhaov = np.argmax(mhaov_pow)
-    best_mhaov     = test_periods[best_idx_mhaov]
-    F_best         = float(mhaov_pow[best_idx_mhaov])
+    if best_nh > cfg_p.mhaov_nh:
+        logger.debug(
+            f"{data.provid}: MHAOV upgraded NH={cfg_p.mhaov_nh}→{best_nh} "
+            f"at {best_mhaov:.3f}hr"
+        )
 
     df_model = 2 * cfg_p.mhaov_nh
     df_resid = data.n_obs - 2 * cfg_p.mhaov_nh - 1
@@ -351,6 +357,18 @@ def check_agreement(
     if d_ce_half <= tol and d_mbls_mhaov <= tol:
         return True, float(max(d_ce_half, d_mbls_mhaov))
 
+    # Case D: MBLS ≈ 2*MHAOV (MHAOV on P/2) AND MBLS within 2*tol of CE
+    # MBLS applied 2-minima rule correctly; MHAOV found P/2; CE is nearby
+    # Use 2*tol for CE since CE is model-free and noisier near aliases
+    d_mbls_ce_loose = abs(p2 - p3) / (p3 + 1e-12)
+    if d_mhaov_half <= tol and d_mbls_ce_loose <= 2 * tol:
+        return True, float(max(d_mhaov_half, d_mbls_ce_loose))
+
+    # Case E: 2-of-3 agreement — MBLS and CE agree, MHAOV is outlier
+    # Handles cases where MHAOV finds a wrong alias but MBLS+CE converge
+    if d_mbls_ce <= 2 * tol:
+        return True, float(d_mbls_ce)
+
     return False, spread_pct
 
 
@@ -404,3 +422,174 @@ def apply_two_minima_rule(
         return period * 2.0, True, n_minima
     else:
         return period, False, n_minima
+
+
+def mhaov_single_sigma(
+    t:      np.ndarray,
+    y:      np.ndarray,
+    dy:     np.ndarray,
+    period: float,
+    nh:     int = 2,
+) -> tuple:
+    """
+    MHAOV at a single period — returns (F_stat, SS_resid, df_resid).
+    Extended version of mhaov_single that also returns residuals for
+    F-test comparison between nested models.
+    """
+    from scipy.stats import f as f_dist
+    w  = 1.0 / dy**2
+    N  = len(t)
+    ph = 2.0 * np.pi * t / period
+
+    cols = [np.ones(N)]
+    for k in range(1, nh + 1):
+        cols.append(np.cos(k * ph))
+        cols.append(np.sin(k * ph))
+    A = np.column_stack(cols)
+
+    try:
+        Aw       = A * w[:, None]
+        coeffs   = np.linalg.solve(Aw.T @ A, Aw.T @ y)
+        y_fit    = A @ coeffs
+        y_wmean  = np.average(y, weights=w)
+        SS_model = np.sum(w * (y_fit - y_wmean)**2)
+        SS_resid = np.sum(w * (y     - y_fit  )**2)
+        df_model = 2 * nh
+        df_resid = N - 2 * nh - 1
+        if df_resid <= 0 or SS_resid == 0:
+            return 0.0, np.inf, 1
+        F_stat = (SS_model / df_model) / (SS_resid / df_resid)
+        return float(F_stat), float(SS_resid), int(df_resid)
+    except np.linalg.LinAlgError:
+        return 0.0, np.inf, 1
+
+
+def mhaov_adaptive_period(
+    t:           np.ndarray,
+    y:           np.ndarray,
+    dy:          np.ndarray,
+    period:      float,
+    nh_min:      int   = 2,
+    nh_max:      int   = 4,
+    f_pval_thresh: float = 0.10,
+) -> tuple:
+    """
+    Test MHAOV at a single period with adaptive harmonic order selection.
+
+    Starts at nh_min (=2), tests whether nh+1 is significantly better
+    via F-test. Accepts higher order only if p < f_pval_thresh.
+
+    This follows the Greenstreet / Vavilov & Carry approach of selecting
+    the simplest model not significantly worse than a more complex one.
+
+    Parameters
+    ----------
+    f_pval_thresh : p-value threshold for accepting a higher NH
+                    0.10 = accept if 90% confident higher order helps
+
+    Returns
+    -------
+    (F_stat, selected_nh, was_upgraded)
+    """
+    from scipy.stats import f as f_dist
+
+    F_best, SS_best, df_best = mhaov_single_sigma(t, y, dy, period, nh=nh_min)
+    selected_nh  = nh_min
+    was_upgraded = False
+
+    for nh in range(nh_min + 1, nh_max + 1):
+        # Check we have enough degrees of freedom
+        N = len(t)
+        if N - 2 * nh - 1 <= 0:
+            break
+
+        F_new, SS_new, df_new = mhaov_single_sigma(t, y, dy, period, nh=nh)
+
+        # F-test: is NH=nh significantly better than NH=nh-1?
+        # H0: the extra harmonics explain no additional variance
+        # Extra params: 2 (one cos + one sin term added)
+        delta_SS  = SS_best - SS_new        # reduction in residual SS
+        extra_df  = 2                        # 2 extra parameters
+        if SS_new <= 0 or df_new <= 0:
+            break
+
+        F_nested = (delta_SS / extra_df) / (SS_new / df_new)
+        p_nested = float(1.0 - f_dist.cdf(F_nested, extra_df, df_new))
+
+        if p_nested < f_pval_thresh:
+            # Higher order significantly better — upgrade
+            F_best      = F_new
+            SS_best     = SS_new
+            df_best     = df_new
+            selected_nh = nh
+            was_upgraded = True
+        else:
+            # No significant improvement — stop
+            break
+
+    return F_best, selected_nh, was_upgraded
+
+
+def mhaov_periodogram_adaptive(
+    t:             np.ndarray,
+    y:             np.ndarray,
+    dy:            np.ndarray,
+    test_periods:  np.ndarray,
+    nh_min:        int   = 2,
+    nh_max:        int   = 4,
+    n_top_peaks:   int   = 10,
+    f_pval_thresh: float = 0.10,
+) -> tuple:
+    """
+    MHAOV periodogram with adaptive harmonic order selection.
+
+    Efficient two-step approach:
+    1. Run NH=nh_min across full period grid (fast)
+    2. Find top n_top_peaks candidate periods
+    3. At each candidate, test NH up to nh_max via F-test
+    4. Return full periodogram (from step 1) and best adaptive period
+
+    Parameters
+    ----------
+    n_top_peaks : number of candidate peaks to test with adaptive NH
+    f_pval_thresh : p-value threshold for accepting higher NH (0.10 typical)
+
+    Returns
+    -------
+    (base_power, best_period, best_F, best_nh)
+    base_power  : NH=nh_min power array (full grid, for plotting)
+    best_period : period with highest adaptive F-stat
+    best_F      : F-stat at best period
+    best_nh     : NH selected at best period
+    """
+    from scipy.signal import find_peaks as _find_peaks
+
+    # Step 1: Full grid scan at NH=nh_min
+    base_power = mhaov_periodogram(t, y, dy, test_periods, nh=nh_min)
+
+    # Step 2: Find top candidate peaks
+    peak_idxs, _ = _find_peaks(base_power, height=base_power.max() * 0.3)
+    if len(peak_idxs) == 0:
+        peak_idxs = np.array([np.argmax(base_power)])
+
+    top_idxs = sorted(peak_idxs, key=lambda i: base_power[i], reverse=True)
+    top_idxs = top_idxs[:n_top_peaks]
+
+    # Step 3: Adaptive NH at each candidate
+    best_F      = -np.inf
+    best_period = test_periods[np.argmax(base_power)]
+    best_nh     = nh_min
+
+    for idx in top_idxs:
+        p = test_periods[idx]
+        F_adapt, nh_adapt, upgraded = mhaov_adaptive_period(
+            t, y, dy, p,
+            nh_min=nh_min, nh_max=nh_max,
+            f_pval_thresh=f_pval_thresh,
+        )
+        if F_adapt > best_F:
+            best_F      = F_adapt
+            best_period = p
+            best_nh     = nh_adapt
+
+    return base_power, best_period, float(best_F), best_nh
