@@ -369,6 +369,13 @@ def check_agreement(
     if d_mbls_ce <= 2 * tol:
         return True, float(d_mbls_ce)
 
+    # Case F: Strong MBLS+MHAOV harmonic relationship alone
+    # MBLS ≈ 2*MHAOV (very tight) — CE is lost but the P/P2 relationship
+    # is highly specific. Flag as partial agreement (spread > tol but
+    # harmonic is clear). Caller should treat as R=2 not R=3.
+    if d_mhaov_half <= tol * 0.5:   # stricter threshold — must be very tight
+        return True, float(d_mhaov_half)
+
     return False, spread_pct
 
 
