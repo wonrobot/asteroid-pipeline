@@ -69,21 +69,6 @@ function aliasShapes(best, periods) {
   return shapes;
 }
 
-function aliasAnnotations(best, periods, maxPow) {
-  const pmin = Math.min(...periods), pmax = Math.max(...periods);
-  const anns = [];
-  if (!best) return anns;
-  const mk = (x, text, color) => x >= pmin && x <= pmax && anns.push({
-    x: x, y: maxPow * 0.97, xref: "x", yref: "y",
-    text, showarrow: false, font: { size: 9, color },
-    xanchor: "center", bgcolor: "rgba(255,255,255,0.7)", borderpad: 2,
-  });
-  mk(best,      `P=${best.toFixed(2)}h`, "#2563eb");
-  mk(best/2,    "P/2",                   "#f59e0b");
-  mk(best*2,    "2P",                    "#f59e0b");
-  ALIAS_HRS.forEach(p => mk(p, `${p}h✗`, "#dc2626"));
-  return anns;
-}
 
 export default function AsteroidCharts({ provid }) {
   const [d, setD]     = useState(null);
@@ -151,11 +136,11 @@ export default function AsteroidCharts({ provid }) {
   }
 
   const pgramLayout = {
-    title: { text: "Periodogram — multi-method comparison", font:{size:12} },
+    title: { text: d.best_period ? `Periodogram — P=${d.best_period.toFixed(3)}h  |  P/2=${(d.best_period/2).toFixed(3)}h  |  2P=${(d.best_period*2).toFixed(3)}h` : 'Periodogram', font:{size:12} },
     xaxis: { title:{text:"Period (hr)"}, type:"log", gridcolor:"#e8edf5" },
     yaxis: { title:{text:"MBLS Power"}, gridcolor:"#e8edf5" },
     shapes: aliasShapes(d.best_period, pg.periods),
-    annotations: aliasAnnotations(d.best_period, pg.periods, maxMBLS),
+
   };
 
   /* ── Phase fold: 2-cycle with residuals ── */
