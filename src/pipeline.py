@@ -42,6 +42,8 @@ from tier1 import run_tier1
 from tier2 import run_tier2
 from tier3 import run_tier3
 from characterise import characterise, DataCharacterisation
+from reliability import compute_reliability
+from reliability import compute_reliability
 from catalog import (
     init_catalog, result_to_row, append_result,
     save_catalog, catalog_summary
@@ -175,22 +177,26 @@ def run_single_asteroid(
     t1 = run_tier1(data, config)
 
     if not t1.passes:
-        return result_to_row(data, t1, char=char)
+        rel = compute_reliability(char, t1)
+    return result_to_row(data, t1, char=char, rel=rel)
 
     # ── Tier 2 ────────────────────────────────────────────────────────────────
     t2 = run_tier2(data, t1, config)
 
     if t2.passes:
         # Methods agreed — publish confirmed period
-        return result_to_row(data, t1, t2, char=char)
+        rel = compute_reliability(char, t1, t2)
+    return result_to_row(data, t1, t2, char=char, rel=rel)
 
     if not t2.to_tier3:
         # Signal not significant and methods disagree — archive
-        return result_to_row(data, t1, t2, char=char)
+        rel = compute_reliability(char, t1, t2)
+    return result_to_row(data, t1, t2, char=char, rel=rel)
 
     # ── Tier 3 ────────────────────────────────────────────────────────────────
     t3 = run_tier3(data, t2, config)
-    return result_to_row(data, t1, t2, t3, char=char)
+    rel = compute_reliability(char, t1, t2, t3)
+    return result_to_row(data, t1, t2, t3, char=char, rel=rel)
 
 
 # ── Logging setup ─────────────────────────────────────────────────────────────

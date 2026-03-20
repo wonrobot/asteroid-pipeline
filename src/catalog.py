@@ -23,6 +23,7 @@ import numpy as np
 import pandas as pd
 
 from config import PipelineConfig, DEFAULT_CONFIG
+from reliability import ReliabilityAssessment
 from preprocessing import PreparedData
 from tier1 import Tier1Result
 from tier2 import Tier2Result
@@ -83,6 +84,7 @@ def result_to_row(
     t2result: Optional[Tier2Result] = None,
     t3result: Optional[Tier3Result] = None,
     char      = None,   # DataCharacterisation | None
+    rel       = None,   # ReliabilityAssessment | None
 ) -> dict:
     """
     Convert pipeline results for one asteroid into a catalog row dict.
@@ -155,6 +157,28 @@ def result_to_row(
     for col in CATALOG_COLUMNS:
         if col not in row:
             row[col] = np.nan
+
+    # ── Reliability assessment fields ────────────────────────────────────────
+    if rel is not None:
+        row["r_code"]            = rel.r_code
+        row["r_flag"]            = rel.r_flag
+        row["adopted_period_hr"] = rel.period_hr
+        row["period_unc_hr"]     = rel.period_unc_hr
+        row["alias_risk"]        = rel.alias_risk
+        row["alias_note"]        = rel.alias_note
+        row["lcdb_agreement"]    = rel.lcdb_agreement
+        row["lcdb_delta_pct"]    = rel.lcdb_delta_pct
+        row["reliability_notes"] = rel.notes
+    else:
+        row["r_code"]            = None
+        row["r_flag"]            = None
+        row["adopted_period_hr"] = np.nan
+        row["period_unc_hr"]     = np.nan
+        row["alias_risk"]        = None
+        row["alias_note"]        = None
+        row["lcdb_agreement"]    = None
+        row["lcdb_delta_pct"]    = None
+        row["reliability_notes"] = None
 
     # ── Data characterisation fields ─────────────────────────────────────────
     if char is not None:
