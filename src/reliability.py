@@ -157,6 +157,7 @@ def compute_reliability(
     full_agreement   = (agreement is True)
     two_of_three     = (agreement == "two_of_three")
     period_spread    = t2result.period_spread_pct
+    mbls_raw         = getattr(t2result, 'best_period_mbls_raw', t2result.best_period_mbls)
     p_value          = t2result.p_value
     consensus_period = t2result.consensus_period
 
@@ -222,6 +223,7 @@ def compute_reliability(
         adopted_period   = adopted_period,
         n_obs            = char.n_obs,
         n_nights         = char.n_nights,
+        mbls_raw         = mbls_raw,
     )
 
     # ── Build r_flag string ───────────────────────────────────────────────────
@@ -258,7 +260,7 @@ def _compute_r_code(
     regime, reliability_ceiling, agreement, period_spread,
     p_value, t2_passes, t3_reliable, t3_ci_width,
     t3_peak_ratio, alias_risk, alias_note, adopted_period,
-    n_obs, n_nights,
+    n_obs, n_nights, mbls_raw=None,
 ) -> tuple:
     """
     Core R code decision logic. Returns (r_code, notes_string).
@@ -287,13 +289,23 @@ def _compute_r_code(
     ceiling_map = {"high": 3, "medium": 2, "low": 1, "unknown": 1}
     ceiling     = ceiling_map.get(reliability_ceiling, 1)
 
-    # Superfast rotator cap — periods < 2.2 hr are at high risk of 2-minima
-    # false doubling regardless of data quality. Cap at R=2 unless multiyear
-    # data (more phase coverage per rotation) or combined (multi-survey).
+    # Superfast rotator cap — if the RAW (pre-doubling) MBLS period was below
+    # the 2.2hr spin barrier, cap at R=2 regardless of the adopted period.
+    # This catches cases where 2-minima doubling pushed the period above 2.2hr
+    # but the underlying detection is still a fast rotator.
     SPIN_BARRIER_HR = 2.2
-    if (not np.isnan(adopted_period)
-            and adopted_period < SPIN_BARRIER_HR
-            and regime not in ('rich_multiyear', 'combined')):
+    superfast_raw = (
+        mbls_raw is not None
+        and not np.isnan(mbls_raw)
+        and mbls_raw < SPIN_BARRIER_HR
+        and regime not in ('rich_multiyear', 'combined')
+    )
+    superfast_adopted = (
+        not np.isnan(adopted_period)
+        and adopted_period < SPIN_BARRIER_HR
+        and regime not in ('rich_multiyear', 'combined')
+    )
+    if superfast_raw or superfast_adopted:
         ceiling = min(ceiling, 2)
 
     # No period

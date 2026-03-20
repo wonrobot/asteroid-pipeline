@@ -71,6 +71,7 @@ class Tier2Result:
     to_tier3:          bool
     best_period_mhaov: float
     best_period_mbls:  float
+    best_period_mbls_raw: float  # before 2-minima doubling
     best_period_ce:    float
     consensus_period:  float
     F_stat:            float
@@ -102,17 +103,16 @@ def run_tier2(
     cfg_p = config.period
     cfg_t = config.tier
 
-    # Fine period grid
-    test_periods = np.linspace(
-        cfg_p.period_min_hr,
-        min(cfg_p.period_max_hr, data.baseline_hr),
-        cfg_p.n_grid_fine,
-    )
+    # Fine period grid — dynamic sizing, data-driven floor
+    p_min = data.period_min_hr
+    p_max = min(cfg_p.period_max_hr, data.baseline_hr)
+    # 10× oversampling for Tier 2 refinement (Greenstreet standard)
+    n_t2  = max(cfg_p.n_grid_fine,
+                int(10 * data.baseline_hr * (1.0/p_min - 1.0/p_max)))
+    n_t2  = min(n_t2, 50_000)  # cap to keep runtime reasonable
+    test_periods = np.linspace(p_min, p_max, n_t2)
 
     # ── 1. MHAOV adaptive NH — merged series ──────────────────────────────────
-    # Runs NH=2 across full grid, then tests NH=3,4 at top candidate peaks
-    # via F-test. Accepts higher order only if significantly better (p<0.10).
-    # This handles asymmetric lightcurves that fixed NH=2 underfits.
     logger.debug(f"{data.provid}: running MHAOV adaptive NH=2-4...")
     mhaov_pow, best_mhaov, F_best, best_nh = mhaov_periodogram_adaptive(
         data.t_hrs, data.y_dt, data.dy, test_periods,
@@ -129,7 +129,6 @@ def run_tier2(
     p_value  = float(1.0 - f_dist.cdf(F_best, df_model, max(df_resid, 1)))
 
     # ── 2. MBLS Nterms=2 — raw multiband series, no pre-applied offsets ───────
-    # MBLS fits per-band means internally as part of the model.
     logger.debug(f"{data.provid}: running MBLS Nterms=2...")
     try:
         mbls_pow      = mbls_periodogram(
@@ -151,13 +150,13 @@ def run_tier2(
             )
     except Exception as e:
         logger.warning(f"{data.provid}: MBLS Tier2 failed ({e}) — using MHAOV period")
-        mbls_pow  = mhaov_pow.copy()
-        best_mbls = best_mhaov
+        mbls_pow      = mhaov_pow.copy()
+        best_mbls_raw = best_mhaov
+        best_mbls     = best_mhaov
 
-    # ── 3. Conditional Entropy — merged series, denser grid ──────────────────
-    # CE is a histogram method — unreliable below ~1hr because the phase
-    # histogram bins are too sparse to resolve fast rotator peaks.
-    # Skip CE when the data-driven Nyquist floor is below 1hr and use
+    # ── 3. Conditional Entropy — skip below 1hr (histogram unreliable) ────────
+    # CE is unreliable below ~1hr because the phase histogram bins are too
+    # sparse to resolve fast rotator peaks. Skip CE for fast rotators and use
     # MHAOV+MBLS two-of-three agreement instead (Greenstreet-equivalent).
     CE_MIN_HR = 1.0
     ce_skip   = (data.period_min_hr < CE_MIN_HR)
@@ -182,17 +181,15 @@ def run_tier2(
         )
         best_ce = ce_periods[np.argmin(ce_scores)]
 
-    # ── Agreement check ───────────────────────────────────────────────────────
+    # ── Agreement check ────────────────────────────────────────────────────────
     agrees, spread_pct = check_agreement(best_mhaov, best_mbls, best_ce, cfg_t.agreement_tol)
 
     # Consensus: if MBLS doubled (harmonic case), weight toward MBLS
-    # as it has the most information (2-minima correction applied)
     d_mhaov_half = abs(best_mbls - 2*best_mhaov) / (2*best_mhaov + 1e-12)
     d_ce_half    = abs(best_mbls - 2*best_ce)    / (2*best_ce    + 1e-12)
     mbls_doubled = d_mhaov_half <= cfg_t.agreement_tol or d_ce_half <= cfg_t.agreement_tol
 
     if agrees and mbls_doubled:
-        # MBLS corrected a P/2 alias — use MBLS as consensus
         consensus = float(best_mbls)
     else:
         consensus = float(np.median([best_mhaov, best_mbls, best_ce]))
@@ -203,67 +200,50 @@ def run_tier2(
         f"agree={agrees}  F={F_best:.1f}  p={p_value:.2e}"
     )
 
-    # ── Decision ──────────────────────────────────────────────────────────────
-    # Normalise agreement value for downstream logic
-    full_agreement    = (agrees is True)
-    two_of_three      = (agrees == "two_of_three")
-    any_agreement     = full_agreement or two_of_three
+    # ── Decision ───────────────────────────────────────────────────────────────
+    full_agreement = (agrees is True)
+    two_of_three   = (agrees == "two_of_three")
+    any_agreement  = full_agreement or two_of_three
 
-    if p_value >= cfg_t.mhaov_pval_thresh and not any_agreement:
+    # Helper to build Tier2Result — avoids repeating all fields
+    def _make_result(passes, to_tier3, agreement_val, reject_reason=None, consensus_p=None):
         return Tier2Result(
-            provid=data.provid, passes=False, to_tier3=False,
-            best_period_mhaov=best_mhaov, best_period_mbls=best_mbls,
-            best_period_ce=best_ce, consensus_period=consensus,
+            provid=data.provid, passes=passes, to_tier3=to_tier3,
+            best_period_mhaov=best_mhaov,
+            best_period_mbls=best_mbls,
+            best_period_mbls_raw=best_mbls_raw,
+            best_period_ce=best_ce,
+            consensus_period=consensus_p if consensus_p is not None else consensus,
             F_stat=F_best, p_value=p_value,
             amplitude=data.amplitude, snr=data.snr,
-            agreement=False, period_spread_pct=spread_pct,
-            reject_reason=f"p-value={p_value:.2e} not significant and methods disagree",
-            test_periods=test_periods, mhaov_power=mhaov_pow,
-            mbls_power=mbls_pow, ce_scores=ce_scores,
+            agreement=agreement_val,
+            period_spread_pct=spread_pct,
+            reject_reason=reject_reason,
+            test_periods=test_periods,
+            mhaov_power=mhaov_pow,
+            mbls_power=mbls_pow,
+            ce_scores=ce_scores,
+        )
+
+    if p_value >= cfg_t.mhaov_pval_thresh and not any_agreement:
+        return _make_result(
+            passes=False, to_tier3=False, agreement_val=False,
+            reject_reason=f"p-value={p_value:.2e} not significant and methods disagree"
         )
 
     if full_agreement and p_value < cfg_t.mhaov_pval_thresh:
-        # All 3 agree → confirmed
-        return Tier2Result(
-            provid=data.provid, passes=True, to_tier3=False,
-            best_period_mhaov=best_mhaov, best_period_mbls=best_mbls,
-            best_period_ce=best_ce, consensus_period=consensus,
-            F_stat=F_best, p_value=p_value,
-            amplitude=data.amplitude, snr=data.snr,
-            agreement=True, period_spread_pct=spread_pct,
-            reject_reason=None,
-            test_periods=test_periods, mhaov_power=mhaov_pow,
-            mbls_power=mbls_pow, ce_scores=ce_scores,
-        )
+        return _make_result(passes=True, to_tier3=False, agreement_val=True)
 
     if two_of_three and p_value < cfg_t.mhaov_pval_thresh:
-        # MHAOV+MBLS agree but CE disagrees — equivalent to Greenstreet LSM+Fourier
-        # Publish as R=1 tentative rather than escalating to Tier 3
         logger.debug(f"{data.provid} Tier2: 2-of-3 agreement (MHAOV+MBLS) — tentative publish")
-        return Tier2Result(
-            provid=data.provid, passes=True, to_tier3=False,
-            best_period_mhaov=best_mhaov, best_period_mbls=best_mbls,
-            best_period_ce=best_ce, consensus_period=best_mbls,
-            F_stat=F_best, p_value=p_value,
-            amplitude=data.amplitude, snr=data.snr,
-            agreement="two_of_three", period_spread_pct=spread_pct,
-            reject_reason=None,
-            test_periods=test_periods, mhaov_power=mhaov_pow,
-            mbls_power=mbls_pow, ce_scores=ce_scores,
+        return _make_result(
+            passes=True, to_tier3=False, agreement_val="two_of_three",
+            consensus_p=best_mbls
         )
 
     # Full disagreement — escalate to Tier 3
-    return Tier2Result(
-        provid=data.provid, passes=False, to_tier3=True,
-        best_period_mhaov=best_mhaov, best_period_mbls=best_mbls,
-        best_period_ce=best_ce, consensus_period=consensus,
-        F_stat=F_best, p_value=p_value,
-        amplitude=data.amplitude, snr=data.snr,
-        agreement=False, period_spread_pct=spread_pct,
-        reject_reason=None,
-        test_periods=test_periods, mhaov_power=mhaov_pow,
-        mbls_power=mbls_pow, ce_scores=ce_scores,
-    )
+    return _make_result(passes=False, to_tier3=True, agreement_val=False)
+
 
 
 # ── MHAOV implementation ──────────────────────────────────────────────────────

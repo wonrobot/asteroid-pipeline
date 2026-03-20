@@ -85,7 +85,7 @@ class TierConfig:
 
     snr_threshold:      float = 3.0
     min_obs:            int   = 20
-    agreement_tol:      float = 0.05
+    agreement_tol:      float = 0.10  # 10% — matches Greenstreet et al. 2026
     mhaov_pval_thresh:  float = 0.001
     bayesian_ci_thresh: float = 0.5
     clean_peak_ratio:   float = 3.0
