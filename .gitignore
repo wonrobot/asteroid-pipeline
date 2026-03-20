@@ -9,3 +9,6 @@ results/plots/
 dist/
 build/
 .env
+
+# Downloaded data caches
+data/
