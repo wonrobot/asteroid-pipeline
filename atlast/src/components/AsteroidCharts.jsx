@@ -13,7 +13,7 @@ const NIGHT_COLORS = [
   "#43aa8b","#577590","#f9844a","#4d908e","#277da1",
 ];
 
-function useNightMap(mjd) {
+function getNightMap(mjd) {
   const nights = {};
   let nid = 0;
   const sorted = [...new Set(mjd.map(m => Math.floor(m)))].sort((a,b)=>a-b);
@@ -74,7 +74,7 @@ function aliasAnnotations(best, periods, maxPow) {
   const anns = [];
   if (!best) return anns;
   const mk = (x, text, color) => x >= pmin && x <= pmax && anns.push({
-    x: Math.log10(x), y: maxPow * 0.97, xref: "x", yref: "y",
+    x: x, y: maxPow * 0.97, xref: "x", yref: "y",
     text, showarrow: false, font: { size: 9, color },
     xanchor: "center", bgcolor: "rgba(255,255,255,0.7)", borderpad: 2,
   });
@@ -102,7 +102,8 @@ export default function AsteroidCharts({ provid }) {
   if (err) return <p style={S.msg}>No chart data available.</p>;
   if (!d)  return <p style={S.msg}>Loading charts…</p>;
 
-  const nightIdx = useNightMap(d.obs.mjd);
+  
+  const nightIdx = getNightMap(d.obs.mjd);
   const nights   = [...new Set(nightIdx)];
   const bands    = [...new Set(d.obs.band)];
 
