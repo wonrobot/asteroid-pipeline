@@ -131,7 +131,11 @@ def result_to_row(
         if t2result.passes:
             row["final_period_hr"]     = t2result.consensus_period
             row["final_period_unc_hr"] = t2result.consensus_period * t2result.period_spread_pct
-            row["reliability"]         = "confirmed"
+            # two_of_three agreement → tentative; full agreement → confirmed
+            if t2result.agreement == "two_of_three":
+                row["reliability"] = "tentative_2of3"
+            else:
+                row["reliability"] = "confirmed"
     else:
         row.update({k: np.nan for k in CATALOG_COLUMNS
                     if k.startswith("t2_")})

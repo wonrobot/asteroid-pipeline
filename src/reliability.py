@@ -153,7 +153,9 @@ def compute_reliability(
         )
 
     # ── Extract Tier 2 diagnostics ────────────────────────────────────────────
-    agreement        = t2result.agreement
+    agreement        = t2result.agreement   # True, False, or "two_of_three"
+    full_agreement   = (agreement is True)
+    two_of_three     = (agreement == "two_of_three")
     period_spread    = t2result.period_spread_pct
     p_value          = t2result.p_value
     consensus_period = t2result.consensus_period
@@ -285,6 +287,15 @@ def _compute_r_code(
     ceiling_map = {"high": 3, "medium": 2, "low": 1, "unknown": 1}
     ceiling     = ceiling_map.get(reliability_ceiling, 1)
 
+    # Superfast rotator cap — periods < 2.2 hr are at high risk of 2-minima
+    # false doubling regardless of data quality. Cap at R=2 unless multiyear
+    # data (more phase coverage per rotation) or combined (multi-survey).
+    SPIN_BARRIER_HR = 2.2
+    if (not np.isnan(adopted_period)
+            and adopted_period < SPIN_BARRIER_HR
+            and regime not in ('rich_multiyear', 'combined')):
+        ceiling = min(ceiling, 2)
+
     # No period
     if np.isnan(adopted_period):
         if not t2_passes and not t3_reliable:
@@ -304,6 +315,18 @@ def _compute_r_code(
 
     # T2 published
     if t2_passes:
+        two_of_three_flag = (agreement == "two_of_three")
+
+        if two_of_three_flag:
+            # MHAOV+MBLS agree (Greenstreet-equivalent) but CE disagrees
+            # Cap at R=1 regardless of regime — CE failure signals residual alias risk
+            r = 1
+            note = _note(
+                f"MHAOV+MBLS agree (Greenstreet-equivalent, spread={period_spread*100:.1f}%), "
+                f"CE disagrees. p={p_value:.2e}. Publish as tentative (R=1)."
+            )
+            return min(r, ceiling), note
+
         if regime in ("dense", "rich_multiyear", "combined"):
             if p_value < 0.001:
                 r = 3

@@ -71,9 +71,51 @@ class PreparedData:
     snr:              float
     band_counts:      Dict[str, int]
     geometry_applied: bool          # True if JPL Horizons data was used
+    period_min_hr:    float          # data-driven Nyquist floor (hours)
 
 
 # ── Main function ─────────────────────────────────────────────────────────────
+
+def compute_nyquist_floor(
+    t_hrs:      np.ndarray,
+    n_cycles:   float = 4.0,
+    clamp_lo:   float = 0.01,
+    clamp_hi:   float = 0.5,
+) -> float:
+    """
+    Data-driven period floor from actual observation cadence.
+
+    Uses the 10th percentile of intra-night gaps (gaps < 1hr) as the
+    minimum cadence, then requires n_cycles observations per rotation.
+
+    For Rubin First Look: typical min gap ~0.68 min → floor ~0.047hr.
+    This correctly marks MJ71/MN45 (0.031hr) as undetectable while
+    opening MG56 (0.264hr) and MK41 (0.063hr) for analysis.
+
+    Parameters
+    ----------
+    t_hrs    : observation times in hours
+    n_cycles : how many obs per rotation required (4 = conservative)
+    clamp_lo : absolute minimum floor in hours (default 0.01 = 36s)
+    clamp_hi : absolute maximum floor in hours (default 0.5)
+
+    Returns
+    -------
+    period_min_hr : float
+    """
+    if len(t_hrs) < 4:
+        return clamp_hi
+
+    gaps       = np.diff(np.sort(t_hrs))
+    intra      = gaps[(gaps > 0) & (gaps < 1.0)]  # intra-night only
+
+    if len(intra) < 4:
+        return clamp_hi
+
+    p10_cadence = float(np.percentile(intra, 10))
+    floor       = n_cycles * p10_cadence
+    return float(np.clip(floor, clamp_lo, clamp_hi))
+
 
 def preprocess(
     df_obj: pd.DataFrame,
@@ -185,6 +227,15 @@ def preprocess(
         f"geom={'horizons' if geometry_applied else 'poly'}"
     )
 
+    # Data-driven period floor — overrides config minimum if tighter
+    nyquist_floor = compute_nyquist_floor(t_hrs)
+    effective_min = max(nyquist_floor, config.period.period_min_hr)
+
+    logger.debug(
+        f"{provid}: Nyquist floor={nyquist_floor*60:.1f}min "
+        f"effective_min={effective_min*60:.1f}min"
+    )
+
     return PreparedData(
         provid            = provid,
         t_hrs             = t_hrs,
@@ -201,6 +252,7 @@ def preprocess(
         snr               = snr,
         band_counts       = band_counts,
         geometry_applied  = geometry_applied,
+        period_min_hr     = effective_min,
     )
 
 

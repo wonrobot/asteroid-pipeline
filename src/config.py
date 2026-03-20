@@ -57,7 +57,9 @@ class DataConfig:
 class PeriodConfig:
     """Period search grid and algorithm settings."""
 
-    period_min_hr:  float = 0.5
+    period_min_hr:  float = 0.01  # hard floor (36s) — actual floor computed
+                                  # dynamically from Nyquist cadence in preprocess()
+                                  # For Rubin First Look this resolves to ~0.047hr
     period_max_hr:  float = 24.0
     n_grid_coarse:  int   = 2_000
     n_grid_fine:    int   = 3_000
@@ -95,12 +97,13 @@ class TierConfig:
 class OutputConfig:
     """Catalog and file output settings."""
 
-    results_dir:  str  = "results"
-    catalog_file: str  = "results/period_catalog.csv"
-    log_file:     str  = "results/pipeline.log"
-    save_plots:   bool = False
-    plots_dir:    str  = "results/plots"
-    verbose:      bool = True
+    results_dir:      str  = "results"
+    catalog_file:     str  = "results/period_catalog.csv"
+    log_file:         str  = "results/pipeline.log"
+    save_plots:       bool = False
+    plots_dir:        str  = "results/plots"
+    precompute_dir:   str  = ""      # if set, saves .npz arrays per asteroid here
+    verbose:          bool = True
 
 
 # ── Master config ─────────────────────────────────────────────────────────────

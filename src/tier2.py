@@ -155,19 +155,32 @@ def run_tier2(
         best_mbls = best_mhaov
 
     # ── 3. Conditional Entropy — merged series, denser grid ──────────────────
-    # CE is a histogram method — needs denser sampling than MHAOV/MBLS
-    # to resolve close peaks. Use separate n_grid_ce (default 8k).
-    logger.debug(f"{data.provid}: running Conditional Entropy...")
-    ce_periods = np.linspace(
-        cfg_p.period_min_hr,
-        min(cfg_p.period_max_hr, data.baseline_hr),
-        cfg_p.n_grid_ce,
-    )
-    ce_scores = ce_periodogram(
-        data.t_hrs, data.y_dt, ce_periods,
-        n_phase=cfg_p.ce_n_phase, n_mag=cfg_p.ce_n_mag
-    )
-    best_ce = ce_periods[np.argmin(ce_scores)]
+    # CE is a histogram method — unreliable below ~1hr because the phase
+    # histogram bins are too sparse to resolve fast rotator peaks.
+    # Skip CE when the data-driven Nyquist floor is below 1hr and use
+    # MHAOV+MBLS two-of-three agreement instead (Greenstreet-equivalent).
+    CE_MIN_HR = 1.0
+    ce_skip   = (data.period_min_hr < CE_MIN_HR)
+    if ce_skip:
+        logger.debug(
+            f"{data.provid}: CE skipped "
+            f"(Nyquist floor={data.period_min_hr*60:.1f}min < 60min)"
+        )
+        ce_periods = test_periods
+        ce_scores  = np.ones(len(test_periods))  # flat — no CE signal
+        best_ce    = best_mhaov  # forces two_of_three path
+    else:
+        logger.debug(f"{data.provid}: running Conditional Entropy...")
+        ce_periods = np.linspace(
+            max(data.period_min_hr, CE_MIN_HR),
+            min(cfg_p.period_max_hr, data.baseline_hr),
+            cfg_p.n_grid_ce,
+        )
+        ce_scores = ce_periodogram(
+            data.t_hrs, data.y_dt, ce_periods,
+            n_phase=cfg_p.ce_n_phase, n_mag=cfg_p.ce_n_mag
+        )
+        best_ce = ce_periods[np.argmin(ce_scores)]
 
     # ── Agreement check ───────────────────────────────────────────────────────
     agrees, spread_pct = check_agreement(best_mhaov, best_mbls, best_ce, cfg_t.agreement_tol)
@@ -191,20 +204,26 @@ def run_tier2(
     )
 
     # ── Decision ──────────────────────────────────────────────────────────────
-    if p_value >= cfg_t.mhaov_pval_thresh and not agrees:
+    # Normalise agreement value for downstream logic
+    full_agreement    = (agrees is True)
+    two_of_three      = (agrees == "two_of_three")
+    any_agreement     = full_agreement or two_of_three
+
+    if p_value >= cfg_t.mhaov_pval_thresh and not any_agreement:
         return Tier2Result(
             provid=data.provid, passes=False, to_tier3=False,
             best_period_mhaov=best_mhaov, best_period_mbls=best_mbls,
             best_period_ce=best_ce, consensus_period=consensus,
             F_stat=F_best, p_value=p_value,
             amplitude=data.amplitude, snr=data.snr,
-            agreement=agrees, period_spread_pct=spread_pct,
+            agreement=False, period_spread_pct=spread_pct,
             reject_reason=f"p-value={p_value:.2e} not significant and methods disagree",
             test_periods=test_periods, mhaov_power=mhaov_pow,
             mbls_power=mbls_pow, ce_scores=ce_scores,
         )
 
-    if agrees and p_value < cfg_t.mhaov_pval_thresh:
+    if full_agreement and p_value < cfg_t.mhaov_pval_thresh:
+        # All 3 agree → confirmed
         return Tier2Result(
             provid=data.provid, passes=True, to_tier3=False,
             best_period_mhaov=best_mhaov, best_period_mbls=best_mbls,
@@ -217,7 +236,23 @@ def run_tier2(
             mbls_power=mbls_pow, ce_scores=ce_scores,
         )
 
-    # Disagree or marginal — escalate to Tier 3
+    if two_of_three and p_value < cfg_t.mhaov_pval_thresh:
+        # MHAOV+MBLS agree but CE disagrees — equivalent to Greenstreet LSM+Fourier
+        # Publish as R=1 tentative rather than escalating to Tier 3
+        logger.debug(f"{data.provid} Tier2: 2-of-3 agreement (MHAOV+MBLS) — tentative publish")
+        return Tier2Result(
+            provid=data.provid, passes=True, to_tier3=False,
+            best_period_mhaov=best_mhaov, best_period_mbls=best_mbls,
+            best_period_ce=best_ce, consensus_period=best_mbls,
+            F_stat=F_best, p_value=p_value,
+            amplitude=data.amplitude, snr=data.snr,
+            agreement="two_of_three", period_spread_pct=spread_pct,
+            reject_reason=None,
+            test_periods=test_periods, mhaov_power=mhaov_pow,
+            mbls_power=mbls_pow, ce_scores=ce_scores,
+        )
+
+    # Full disagreement — escalate to Tier 3
     return Tier2Result(
         provid=data.provid, passes=False, to_tier3=True,
         best_period_mhaov=best_mhaov, best_period_mbls=best_mbls,
@@ -451,7 +486,7 @@ def check_agreement(
     p2:  float,
     p3:  float,
     tol: float = 0.05,
-) -> Tuple[bool, float]:
+) -> Tuple[object, float]:
     """
     Check whether period estimates agree within fractional tolerance.
 
@@ -494,6 +529,12 @@ def check_agreement(
     # Case C: MBLS = 2*CE AND MBLS ≈ MHAOV
     if d_ce_half <= tol and d_mbls_mhaov <= tol_harmonic:
         return True, float(max(d_ce_half, d_mbls_mhaov))
+
+    # Two-of-three check: MHAOV (p1) and MBLS (p2) agree, CE (p3) does not
+    # Equivalent to Greenstreet LSM+Fourier agreement criterion
+    d_mhaov_mbls = abs(p1 - p2) / (p2 + 1e-12)
+    if d_mhaov_mbls <= tol:
+        return "two_of_three", float(d_mhaov_mbls)
 
     return False, spread_pct
 
