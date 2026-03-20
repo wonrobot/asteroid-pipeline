@@ -42,6 +42,7 @@ from tier1 import run_tier1
 from tier2 import run_tier2
 from tier3 import run_tier3
 from characterise import characterise, DataCharacterisation
+from precompute import save_all as _precompute_save_all
 from reliability import compute_reliability
 from catalog import (
     init_catalog, result_to_row, append_result,
@@ -248,6 +249,7 @@ def run_pipeline(
 def run_single_asteroid(
     df_obj: pd.DataFrame,
     config: PipelineConfig = DEFAULT_CONFIG,
+    output_plots_dir: str = None,
 ) -> dict:
     """
     Run all tiers for a single asteroid and return a catalog row dict.
@@ -283,19 +285,24 @@ def run_single_asteroid(
 
     if not t1.passes:
         rel = compute_reliability(char, t1)
+        if output_plots_dir:
+            _precompute_save_all(provid, data, t1, None, None, rel, output_plots_dir)
         return result_to_row(data, t1, char=char, rel=rel)
 
     # ── Tier 2 ────────────────────────────────────────────────────────────────
     t2 = run_tier2(data, t1, config)
 
     if not t2.to_tier3:
-        # Methods agreed OR signal not significant — publish or archive
         rel = compute_reliability(char, t1, t2)
+        if output_plots_dir:
+            _precompute_save_all(provid, data, t1, t2, None, rel, output_plots_dir)
         return result_to_row(data, t1, t2, char=char, rel=rel)
 
     # ── Tier 3 ────────────────────────────────────────────────────────────────
     t3  = run_tier3(data, t2, config)
     rel = compute_reliability(char, t1, t2, t3)
+    if output_plots_dir:
+        _precompute_save_all(provid, data, t1, t2, t3, rel, output_plots_dir)
     return result_to_row(data, t1, t2, t3, char=char, rel=rel)
 
 
