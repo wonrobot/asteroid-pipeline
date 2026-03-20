@@ -165,7 +165,7 @@ def compute_reliability(
     t3_reliable   = False
 
     if t3result is not None:
-        t3_period     = t3result.best_period_bayes
+        t3_period     = t3result.best_period_adopted
         t3_ci_width   = t3result.ci_width
         t3_peak_ratio = t3result.clean_peak_ratio
         t3_reliable   = t3result.publish_tentative

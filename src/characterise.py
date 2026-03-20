@@ -195,7 +195,10 @@ def characterise(
     snr_proxy   = mag_range / median_err if median_err > 0 else 0.0
 
     # ── Regime classification ─────────────────────────────────────────────────
-    n_sources = 1  # single source for now; extend when ZTF etc added
+    # TODO: n_sources hardcoded to 1 — "combined" regime is currently unreachable.
+    # When adding ZTF or other surveys, pass n_sources here and update ingestion.py
+    # to tag observations by source before calling characterise().
+    n_sources = 1
     regime = _classify_regime(
         n_obs=n_obs,
         baseline_days=baseline_days,

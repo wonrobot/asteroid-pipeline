@@ -17,7 +17,7 @@ LSST nightly stream
            Conditional Entropy
       │
   All 3 agree within 5%?
-      │ Yes                No → Tier 3: Bayesian + CLEAN → flag for follow-up
+      │ Yes                No → Tier 3: CLEAN alias deconvolution → flag for follow-up
       │
   Publish period to catalog
 ```
@@ -31,7 +31,7 @@ LSST nightly stream
 | 2 | MHAOV NH=2 | Real p-values, models double-hump directly |
 | 2 | MBLS Nterms=2 | Independent multi-band confirmation |
 | 2 | Conditional Entropy | Model-free validator |
-| 3 | Bayesian posterior | Quantified uncertainty, 95% CI |
+| 3 | CLEAN              | Alias deconvolution from window function |
 | 3 | CLEAN | Alias deconvolution from window function |
 
 ## Data source
@@ -50,11 +50,17 @@ asteroid_pipeline/
 │   ├── config.py          # All tunable parameters
 │   ├── ingestion.py       # BigQuery + CSV data loading
 │   ├── preprocessing.py   # Band offsets, detrending, quality cuts
+│   ├── characterise.py    # Data regime classification (dense/sparse/multiyear)
+│   ├── geometry.py        # JPL Horizons geometry + HG phase correction
 │   ├── tier1.py           # Fast screening: GLS + MBLS
 │   ├── tier2.py           # Period refinement: MHAOV + MBLS + CE
-│   ├── tier3.py           # Disambiguation: Bayesian + CLEAN
+│   ├── tier3.py           # Disambiguation: CLEAN alias deconvolution
+│   ├── reliability.py     # R-code reliability assessment
 │   ├── catalog.py         # Results storage and output
-│   └── pipeline.py        # Orchestration — runs all tiers
+│   ├── window.py          # Spectral window function (alias visualisation)
+│   ├── pipeline.py        # Orchestration — runs all tiers
+│   └── sources/
+│       └── lcdb.py        # LCDB lookup and comparison
 ├── notebooks/
 │   └── pipeline_colab.ipynb   # Main Colab notebook
 └── tests/

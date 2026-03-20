@@ -74,7 +74,7 @@ class Tier3Result:
     provid:             str
     publish_tentative:  bool
     needs_followup:     bool
-    best_period_bayes:  float
+    best_period_adopted: float
     best_period_clean:  float
     ci_lo:              float
     ci_hi:              float
@@ -156,7 +156,7 @@ def run_tier3(
     if clean_agrees and clean_strong:
         return Tier3Result(
             provid=data.provid, publish_tentative=True, needs_followup=False,
-            best_period_bayes=best_mbls, best_period_clean=best_clean,
+            best_period_adopted=best_mbls, best_period_clean=best_clean,
             ci_lo=ci_lo, ci_hi=ci_hi, ci_width=ci_width,
             clean_peak_ratio=peak_ratio,
             final_period=best_mbls, final_period_unc=ci_width / 2.0,
@@ -167,7 +167,7 @@ def run_tier3(
 
     return Tier3Result(
         provid=data.provid, publish_tentative=False, needs_followup=True,
-        best_period_bayes=best_mbls, best_period_clean=best_clean,
+        best_period_adopted=best_mbls, best_period_clean=best_clean,
         ci_lo=ci_lo, ci_hi=ci_hi, ci_width=ci_width,
         clean_peak_ratio=peak_ratio,
         final_period=np.nan, final_period_unc=np.nan,

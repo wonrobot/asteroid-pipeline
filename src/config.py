@@ -16,10 +16,13 @@ class DataConfig:
     """BigQuery and data loading settings."""
 
     # BigQuery
-    bq_project:    str = "lsst-484623"
-    bq_dataset:    str = "atlast_photometry"
-    bq_table:      str = "public_obs_x05"
-    bq_table_full: str = "lsst-484623.atlast_photometry.public_obs_x05"
+    bq_project: str = "lsst-484623"
+    bq_dataset: str = "atlast_photometry"
+    bq_table:   str = "public_obs_x05"
+
+    @property
+    def bq_table_full(self) -> str:
+        return f"{self.bq_project}.{self.bq_dataset}.{self.bq_table}"
 
     # Which bands to use (u excluded by default — too few observations)
     bands_use: List[str] = field(default_factory=lambda: ["g", "r", "i"])

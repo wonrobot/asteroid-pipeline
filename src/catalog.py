@@ -44,13 +44,14 @@ CATALOG_COLUMNS = [
     "t2_amplitude_mag", "t2_agreement", "t2_period_spread_pct",
     # Tier 3
     "t3_ran", "t3_publish_tentative", "t3_needs_followup",
-    "t3_bayes_period_hr", "t3_clean_period_hr",
+    "t3_adopted_period_hr", "t3_clean_period_hr",
     "t3_ci_lo", "t3_ci_hi", "t3_ci_width", "t3_clean_peak_ratio",
     # Final adopted values
     "final_period_hr", "final_period_unc_hr", "reliability",
     # Reliability assessment
     "r_code", "r_flag", "alias_risk", "alias_note",
     "lcdb_agreement", "lcdb_delta_pct", "reliability_notes",
+    "period_exceeds_grid", "n_cycles",
     # Data characterisation
     "regime", "n_nights", "n_seasons", "obs_per_night_median",
     "night_duration_hr", "reliability_ceiling", "recommended_methods",
@@ -141,7 +142,7 @@ def result_to_row(
             "t3_ran":               True,
             "t3_publish_tentative": bool(t3result.publish_tentative),
             "t3_needs_followup":    bool(t3result.needs_followup),
-            "t3_bayes_period_hr":   t3result.best_period_bayes,
+            "t3_adopted_period_hr": t3result.best_period_adopted,
             "t3_clean_period_hr":   t3result.best_period_clean,
             "t3_ci_lo":             t3result.ci_lo,
             "t3_ci_hi":             t3result.ci_hi,
@@ -161,6 +162,16 @@ def result_to_row(
         row.update({k: np.nan for k in CATALOG_COLUMNS
                     if k.startswith("t3_")})
         row["t3_ran"] = False
+
+    # Flag periods that exceeded the search grid via 2-minima doubling
+    final_p   = row.get("final_period_hr", np.nan)
+    baseline  = data.baseline_hr
+    if not np.isnan(final_p) and not np.isnan(baseline) and baseline > 0:
+        row["period_exceeds_grid"] = bool(final_p > 24.0)
+        row["n_cycles"] = round(baseline / final_p, 1) if final_p > 0 else np.nan
+    else:
+        row["period_exceeds_grid"] = False
+        row["n_cycles"] = np.nan
 
     # Ensure reliability is always set
     if row.get("reliability") is None or (isinstance(row.get("reliability"), float) and np.isnan(row.get("reliability", 0.0))):

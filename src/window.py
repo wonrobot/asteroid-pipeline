@@ -3,6 +3,21 @@ window.py
 ---------
 Spectral window function computation and window-informed peak selection.
 
+Status: implemented but not yet wired into the main pipeline.
+
+Planned uses
+------------
+1. Periodogram plots — vertical lines at window-dominant frequencies so
+   alias peaks are visually obvious when inspecting individual objects.
+2. Alias identification — contamination_score() can be used in Tier 1/2
+   to automatically down-weight candidates that fall on window peaks,
+   supplementing the existing ALIAS_PERIODS_HR list in reliability.py
+   with cadence-specific aliases rather than just fixed daily/annual ones.
+3. CLEAN input — the window DFT is already computed inside tier3.clean_periodogram;
+   unifying with this module would avoid duplication.
+
+See window_informed_peaks() and best_clean_period() for the main entry points.
+
 The window function reveals which periods are aliases of the sampling cadence.
 Peaks in the data periodogram that coincide with window peaks are penalised
 during period selection.
