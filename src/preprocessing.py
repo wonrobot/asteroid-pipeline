@@ -101,6 +101,28 @@ def preprocess(
     BAND_REMAP = {'g': 'Lg', 'r': 'Lr', 'i': 'Li', 'z': 'Lz', 'y': 'Ly', 'u': 'Lu'}
     df['band'] = df['band'].replace(BAND_REMAP)
 
+    # ── Step 0b: Per-band 3σ outlier rejection ───────────────────────────────
+    # Remove observations more than 3σ from the per-band median magnitude.
+    # Uses MAD-based sigma (×1.4826) rather than std — robust because std
+    # itself gets inflated by outliers, weakening the 3σ cut.
+    # Applied per-band to avoid inter-band colour offsets inflating sigma.
+    # Follows Greenstreet et al. (2026) Section 3.1.
+    keep = np.ones(len(df), dtype=bool)
+    for band in df['band'].unique():
+        mask = (df['band'] == band).values
+        if mask.sum() < 4:
+            continue
+        mags   = df.loc[mask, 'mag'].values
+        med    = float(np.median(mags))
+        mad    = float(np.median(np.abs(mags - med)))
+        sigma  = mad * 1.4826
+        if sigma > 0:
+            keep[mask] = np.abs(mags - med) <= 4.0 * sigma
+    n_removed = int((~keep).sum())
+    if n_removed > 0:
+        logger.debug(f"{provid}: removed {n_removed} outliers (4σ MAD per band)")
+    df = df[keep].reset_index(drop=True)
+
     # ── Step 1: Geometry correction (optional) ────────────────────────────────
     # Applies reduced magnitude + HG phase correction if use_geometry=True.
     # On failure, falls back to the quadratic polynomial detrend below.
