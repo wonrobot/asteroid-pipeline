@@ -43,7 +43,6 @@ from tier2 import run_tier2
 from tier3 import run_tier3
 from characterise import characterise, DataCharacterisation
 from reliability import compute_reliability
-from reliability import compute_reliability
 from catalog import (
     init_catalog, result_to_row, append_result,
     save_catalog, catalog_summary

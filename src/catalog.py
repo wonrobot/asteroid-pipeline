@@ -45,10 +45,16 @@ CATALOG_COLUMNS = [
     # Tier 3
     "t3_ran", "t3_publish_tentative", "t3_needs_followup",
     "t3_bayes_period_hr", "t3_clean_period_hr",
-    "t3_ci_lo", "t3_ci_hi", "t3_ci_width",
-    "t3_clean_peak_ratio",
+    "t3_ci_lo", "t3_ci_hi", "t3_ci_width", "t3_clean_peak_ratio",
     # Final adopted values
     "final_period_hr", "final_period_unc_hr", "reliability",
+    # Reliability assessment
+    "r_code", "r_flag", "alias_risk", "alias_note",
+    "lcdb_agreement", "lcdb_delta_pct", "reliability_notes",
+    # Data characterisation
+    "regime", "n_nights", "n_seasons", "obs_per_night_median",
+    "night_duration_hr", "reliability_ceiling", "recommended_methods",
+    "lcdb_period_hr", "lcdb_u_code",
     # Metadata
     "n_bands", "baseline_hr", "bands_used",
 ]
@@ -133,8 +139,8 @@ def result_to_row(
     if t3result is not None:
         row.update({
             "t3_ran":               True,
-            "t3_publish_tentative": t3result.publish_tentative,
-            "t3_needs_followup":    t3result.needs_followup,
+            "t3_publish_tentative": bool(t3result.publish_tentative),
+            "t3_needs_followup":    bool(t3result.needs_followup),
             "t3_bayes_period_hr":   t3result.best_period_bayes,
             "t3_clean_period_hr":   t3result.best_period_clean,
             "t3_ci_lo":             t3result.ci_lo,
@@ -155,6 +161,13 @@ def result_to_row(
         row.update({k: np.nan for k in CATALOG_COLUMNS
                     if k.startswith("t3_")})
         row["t3_ran"] = False
+
+    # Ensure reliability is always set
+    if row.get("reliability") is None or (isinstance(row.get("reliability"), float) and np.isnan(row.get("reliability", 0.0))):
+        if not t1result.passes:
+            row["reliability"] = "t1_rejected"
+        elif t2result is not None and not t2result.passes and not t2result.to_tier3:
+            row["reliability"] = "t2_rejected"
 
     # Fill any missing fields
     for col in CATALOG_COLUMNS:
