@@ -54,6 +54,112 @@ logger = logging.getLogger(__name__)
 
 # ── Main pipeline entry point ─────────────────────────────────────────────────
 
+
+# ── Multiprocessing support ───────────────────────────────────────────────────
+# Worker state is stored in globals to avoid pickling df on every call.
+_worker_df     = None
+_worker_config = None
+
+def _worker_init(df_shared, config_shared):
+    """Initialise per-worker globals (called once per worker process)."""
+    global _worker_df, _worker_config
+    _worker_df     = df_shared
+    _worker_config = config_shared
+
+def _worker_call(provid):
+    """Process one asteroid — called in worker process."""
+    try:
+        df_obj = load_single_object(provid, _worker_df)
+        row    = run_single_asteroid(df_obj, _worker_config)
+        return provid, row, None
+    except Exception as e:
+        return provid, None, str(e)
+
+
+def run_pipeline_parallel(
+    df:           pd.DataFrame,
+    config:       PipelineConfig = DEFAULT_CONFIG,
+    provids:      Optional[list] = None,
+    save_every_n: int = 100,
+    n_workers:    int = 2,
+) -> pd.DataFrame:
+    """
+    Parallel version of run_pipeline using multiprocessing.Pool.
+
+    Parameters
+    ----------
+    n_workers : int
+        Number of parallel worker processes. Default 2 (Colab free tier).
+        Use multiprocessing.cpu_count() to detect available cores.
+
+    Notes
+    -----
+    Workers share the input dataframe via Pool initializer to avoid
+    pickling it on every task call (~1.4GB would be prohibitive).
+    Results are collected in the main process and checkpointed every
+    save_every_n asteroids.
+    """
+    import multiprocessing as mp
+    from multiprocessing import Pool
+
+    setup_logging(config)
+    catalog = init_catalog(config)
+
+    if provids is None:
+        provids = df["provid"].unique().tolist()
+
+    # Resume: skip already-processed objects
+    already_done = set(catalog["provid"].tolist()) if len(catalog) > 0 else set()
+    if already_done:
+        n_before = len(provids)
+        provids  = [p for p in provids if p not in already_done]
+        logger.info(f"Resuming: skipping {n_before - len(provids)} "
+                    f"already-processed objects")
+
+    logger.info(f"Starting parallel pipeline: {len(provids)} asteroids, "
+                f"{n_workers} workers")
+
+    n_t1_pass = n_t2_pass = n_t3_tentative = n_followup = n_error = 0
+    completed = 0
+
+    with Pool(
+        processes   = n_workers,
+        initializer = _worker_init,
+        initargs    = (df, config),
+    ) as pool:
+        for provid, row, err in tqdm(
+            pool.imap_unordered(_worker_call, provids, chunksize=4),
+            total=len(provids), desc=f"Processing ({n_workers} workers)"
+        ):
+            completed += 1
+
+            if err is not None:
+                logger.error(f"Error processing '{provid}': {err}")
+                n_error += 1
+            else:
+                catalog = append_result(catalog, row)
+                if row.get("t1_passes"):                      n_t1_pass += 1
+                if row.get("t2_passes"):                      n_t2_pass += 1
+                if row.get("reliability") == "tentative":     n_t3_tentative += 1
+                if row.get("reliability") == "followup_needed": n_followup += 1
+
+            if completed % save_every_n == 0:
+                save_catalog(catalog, config)
+                logger.info(
+                    f"Checkpoint [{completed}/{len(provids)}]: "
+                    f"T1={n_t1_pass} T2={n_t2_pass} "
+                    f"tentative={n_t3_tentative} errors={n_error}"
+                )
+
+    save_catalog(catalog, config)
+    logger.info(f"Parallel pipeline complete: {len(provids)} processed, "
+                f"{n_error} errors")
+
+    if config.output.verbose:
+        print(catalog_summary(catalog).to_string(index=False))
+
+    return catalog
+
 def run_pipeline(
     df:                  pd.DataFrame,
     config:              PipelineConfig = DEFAULT_CONFIG,
@@ -178,23 +284,18 @@ def run_single_asteroid(
 
     if not t1.passes:
         rel = compute_reliability(char, t1)
-    return result_to_row(data, t1, char=char, rel=rel)
+        return result_to_row(data, t1, char=char, rel=rel)
 
     # ── Tier 2 ────────────────────────────────────────────────────────────────
     t2 = run_tier2(data, t1, config)
 
-    if t2.passes:
-        # Methods agreed — publish confirmed period
-        rel = compute_reliability(char, t1, t2)
-    return result_to_row(data, t1, t2, char=char, rel=rel)
-
     if not t2.to_tier3:
-        # Signal not significant and methods disagree — archive
+        # Methods agreed OR signal not significant — publish or archive
         rel = compute_reliability(char, t1, t2)
-    return result_to_row(data, t1, t2, char=char, rel=rel)
+        return result_to_row(data, t1, t2, char=char, rel=rel)
 
     # ── Tier 3 ────────────────────────────────────────────────────────────────
-    t3 = run_tier3(data, t2, config)
+    t3  = run_tier3(data, t2, config)
     rel = compute_reliability(char, t1, t2, t3)
     return result_to_row(data, t1, t2, t3, char=char, rel=rel)
 
