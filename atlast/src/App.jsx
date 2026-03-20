@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import Papa from 'papaparse'
+import AsteroidCharts from './components/AsteroidCharts'
 
 /* ─────────────────────────────────────────────
    Design tokens — light scientific theme
@@ -459,9 +460,7 @@ export default function App() {
 
             <div className="detail-note">{scienceNote(selected)}</div>
 
-            <div className="chart-ph">
-              [ Lightcurve · Phase fold · Periodogram ] — interactive charts coming in next build
-            </div>
+            <AsteroidCharts provid={selected.provid} />
           </div>
         )}
 
