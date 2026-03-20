@@ -445,11 +445,14 @@ export default function App() {
                 ['R-code',      <RBadge code={selected.r_code} />],
                 ['Reliability', selected.reliability || '—'],
                 ['Regime',      selected.regime || '—'],
-                ['N obs',       selected.n_obs || '—'],
-                ['Amplitude',   selected.amplitude ? `${parseFloat(selected.amplitude).toFixed(3)} mag` : '—'],
-                ['SNR',         selected.snr ? parseFloat(selected.snr).toFixed(1) : '—'],
+                ['N obs',       selected.t1_n_obs || '—'],
+                ['Amplitude',   selected.t2_amplitude_mag ? `${parseFloat(selected.t2_amplitude_mag).toFixed(3)} mag` : '—'],
+                ['SNR',         selected.t1_snr ? parseFloat(selected.t1_snr).toFixed(1) : '—'],
                 ['Baseline',    selected.baseline_hr ? `${parseFloat(selected.baseline_hr).toFixed(0)} hr` : '—'],
                 ['Alias risk',  selected.alias_risk || '—'],
+                ['N nights',    selected.n_nights || '—'],
+                ['Bands',       selected.bands_used || '—'],
+                ['p-value',     selected.t2_p_value ? parseFloat(selected.t2_p_value).toExponential(2) : '—'],
               ].map(([l, v]) => (
                 <div className="df" key={l}>
                   <span className="df-l">{l}</span>
