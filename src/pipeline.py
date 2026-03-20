@@ -249,26 +249,14 @@ def run_pipeline(
 def run_single_asteroid(
     df_obj: pd.DataFrame,
     config: PipelineConfig = DEFAULT_CONFIG,
-    output_plots_dir: str = None,
 ) -> dict:
     """
     Run all tiers for a single asteroid and return a catalog row dict.
-
-    This is the function to call interactively in a notebook when
-    you want to inspect one asteroid in detail.
-
-    Parameters
-    ----------
-    df_obj : pd.DataFrame
-        Observations for ONE asteroid (all rows must share the same provid)
-    config : PipelineConfig
-
-    Returns
-    -------
-    dict — catalog row (pass to catalog.append_result)
     """
     provid = df_obj["provid"].iloc[0] if "provid" in df_obj.columns else "unknown"
     logger.debug(f"Processing: {provid}")
+
+    pdir = config.output.precompute_dir  # empty string = disabled
 
     # ── Data characterisation ─────────────────────────────────────────────────
     char = characterise(df_obj)
@@ -285,8 +273,8 @@ def run_single_asteroid(
 
     if not t1.passes:
         rel = compute_reliability(char, t1)
-        if output_plots_dir:
-            _precompute_save_all(provid, data, t1, None, None, rel, output_plots_dir)
+        if pdir:
+            _precompute_save_all(provid, data, t1, None, None, rel, pdir)
         return result_to_row(data, t1, char=char, rel=rel)
 
     # ── Tier 2 ────────────────────────────────────────────────────────────────
@@ -294,19 +282,17 @@ def run_single_asteroid(
 
     if not t2.to_tier3:
         rel = compute_reliability(char, t1, t2)
-        if output_plots_dir:
-            _precompute_save_all(provid, data, t1, t2, None, rel, output_plots_dir)
+        if pdir:
+            _precompute_save_all(provid, data, t1, t2, None, rel, pdir)
         return result_to_row(data, t1, t2, char=char, rel=rel)
 
     # ── Tier 3 ────────────────────────────────────────────────────────────────
     t3  = run_tier3(data, t2, config)
     rel = compute_reliability(char, t1, t2, t3)
-    if output_plots_dir:
-        _precompute_save_all(provid, data, t1, t2, t3, rel, output_plots_dir)
+    if pdir:
+        _precompute_save_all(provid, data, t1, t2, t3, rel, pdir)
     return result_to_row(data, t1, t2, t3, char=char, rel=rel)
 
-
-# ── Logging setup ─────────────────────────────────────────────────────────────
 
 def setup_logging(config: PipelineConfig = DEFAULT_CONFIG) -> None:
     """
