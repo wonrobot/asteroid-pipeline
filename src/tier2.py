@@ -126,11 +126,23 @@ def run_tier2(
     # MBLS fits per-band means internally as part of the model.
     logger.debug(f"{data.provid}: running MBLS Nterms=2...")
     try:
-        mbls_pow  = mbls_periodogram(
+        mbls_pow      = mbls_periodogram(
             data.t_hrs, data.y_multiband, data.dy, data.bands,
             test_periods, nterms=cfg_p.mbls_nterms_t2
         )
-        best_mbls = test_periods[np.argmax(mbls_pow)]
+        best_mbls_raw = test_periods[np.argmax(mbls_pow)]
+
+        # Apply 2-minima rule (Greenstreet et al. 2026)
+        best_mbls, was_doubled, n_minima = apply_two_minima_rule(
+            data.t_hrs, data.y_multiband, data.dy, data.bands,
+            period=best_mbls_raw, nterms=cfg_p.mbls_nterms_t2,
+        )
+        if was_doubled:
+            logger.debug(
+                f"{data.provid}: 2-minima rule: "
+                f"{best_mbls_raw:.3f}hr ({n_minima} minima) "
+                f"→ doubled to {best_mbls:.3f}hr"
+            )
     except Exception as e:
         logger.warning(f"{data.provid}: MBLS Tier2 failed ({e}) — using MHAOV period")
         mbls_pow  = mhaov_pow.copy()
@@ -146,7 +158,18 @@ def run_tier2(
 
     # ── Agreement check ───────────────────────────────────────────────────────
     agrees, spread_pct = check_agreement(best_mhaov, best_mbls, best_ce, cfg_t.agreement_tol)
-    consensus          = float(np.median([best_mhaov, best_mbls, best_ce]))
+
+    # Consensus: if MBLS doubled (harmonic case), weight toward MBLS
+    # as it has the most information (2-minima correction applied)
+    d_mhaov_half = abs(best_mbls - 2*best_mhaov) / (2*best_mhaov + 1e-12)
+    d_ce_half    = abs(best_mbls - 2*best_ce)    / (2*best_ce    + 1e-12)
+    mbls_doubled = d_mhaov_half <= cfg_t.agreement_tol or d_ce_half <= cfg_t.agreement_tol
+
+    if agrees and mbls_doubled:
+        # MBLS corrected a P/2 alias — use MBLS as consensus
+        consensus = float(best_mbls)
+    else:
+        consensus = float(np.median([best_mhaov, best_mbls, best_ce]))
 
     logger.debug(
         f"{data.provid} Tier2: MHAOV={best_mhaov:.3f}hr  "
@@ -294,11 +317,90 @@ def check_agreement(
     tol: float = 0.05,
 ) -> Tuple[bool, float]:
     """
-    Check whether three period estimates agree within a fractional tolerance.
+    Check whether period estimates agree within fractional tolerance.
+
+    Also handles the harmonic case: if MBLS (p2) applied the 2-minima
+    rule and doubled a P/2 alias, p2 will be ~2x p1 and/or p3.
+    We recognise this as a P/2 correction and declare agreement on p2.
+
+    p1 = MHAOV, p2 = MBLS (may be doubled), p3 = CE
     Returns (agrees, spread_pct).
     """
+    # Standard check
     periods    = np.array([p1, p2, p3])
     median_p   = np.median(periods)
     spread_pct = float(np.max(np.abs(periods - median_p) / (median_p + 1e-12)))
-    agrees     = spread_pct <= tol
-    return agrees, spread_pct
+
+    if spread_pct <= tol:
+        return True, spread_pct
+
+    # Harmonic check: did MBLS double a P/2 alias?
+    # Case A: MBLS = 2*MHAOV AND MBLS = 2*CE
+    d_mhaov_half = abs(p2 - 2*p1) / (2*p1 + 1e-12)
+    d_ce_half    = abs(p2 - 2*p3) / (2*p3 + 1e-12)
+    if d_mhaov_half <= tol and d_ce_half <= tol:
+        return True, float(max(d_mhaov_half, d_ce_half))
+
+    # Case B: MBLS = 2*MHAOV AND MBLS ≈ CE
+    d_mbls_ce = abs(p2 - p3) / (p3 + 1e-12)
+    if d_mhaov_half <= tol and d_mbls_ce <= tol:
+        return True, float(max(d_mhaov_half, d_mbls_ce))
+
+    # Case C: MBLS = 2*CE AND MBLS ≈ MHAOV
+    d_mbls_mhaov = abs(p2 - p1) / (p1 + 1e-12)
+    if d_ce_half <= tol and d_mbls_mhaov <= tol:
+        return True, float(max(d_ce_half, d_mbls_mhaov))
+
+    return False, spread_pct
+
+
+def apply_two_minima_rule(
+    t:             np.ndarray,
+    y_multiband:   np.ndarray,
+    dy:            np.ndarray,
+    bands:         np.ndarray,
+    period:        float,
+    nterms:        int   = 2,
+    n_phase:       int   = 500,
+    prominence:    float = 0.01,
+    dominant_band: str   = None,
+) -> tuple:
+    """
+    Apply the 2-minima rule to an MBLS period candidate.
+
+    An elongated asteroid produces TWO brightness minima per rotation.
+    If the fitted lightcurve shows fewer than 2 minima, the period is
+    likely P/2 and is doubled. Follows Greenstreet et al. (2026) Sec 3.2.
+
+    Returns (corrected_period, was_doubled, n_minima)
+    """
+    from scipy.signal import find_peaks
+
+    # Determine dominant band
+    if dominant_band is None:
+        unique, counts = np.unique(bands, return_counts=True)
+        dominant_band  = unique[np.argmax(counts)]
+
+    # Fit MBLS model at this period
+    model = LombScargleMultiband(Nterms_base=nterms, Nterms_band=0)
+    model.fit(t, y_multiband, dy, bands)
+
+    # Evaluate on dense phase grid
+    phase_grid   = np.linspace(0, 1, n_phase)
+    t_grid       = phase_grid * period
+    fitted_curve = model.predict(
+        t_grid,
+        filts=np.full(n_phase, dominant_band),
+        period=period,
+    )
+
+    # Count minima with wraparound handling — tile the curve twice,
+    # find all minima, keep only those in the first copy (phase 0-1)
+    tiled      = np.concatenate([fitted_curve, fitted_curve])
+    all_mins, _= find_peaks(-tiled, prominence=prominence)
+    n_minima   = int(np.sum(all_mins < n_phase))
+
+    if n_minima < 2:
+        return period * 2.0, True, n_minima
+    else:
+        return period, False, n_minima
