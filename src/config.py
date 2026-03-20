@@ -56,8 +56,8 @@ class PeriodConfig:
 
     period_min_hr:  float = 0.5
     period_max_hr:  float = 24.0
-    n_grid_coarse:  int   = 8_000
-    n_grid_fine:    int   = 15_000
+    n_grid_coarse:  int   = 2_000
+    n_grid_fine:    int   = 3_000
     samples_per_peak: int = 20
 
     mhaov_nh:       int = 2
