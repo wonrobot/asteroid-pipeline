@@ -104,12 +104,27 @@ def run_tier2(
     cfg_t = config.tier
 
     # Fine period grid — dynamic sizing, data-driven floor
-    p_min = data.period_min_hr
+    # Use T1 best period to set effective lower search bound for T2.
+    # The Nyquist floor (data.period_min_hr) can be very small (~0.047hr)
+    # for dense Rubin data, but most objects have periods >1hr and do not
+    # need a 50k-point grid spanning 0.047–24hr. We use T1 to focus T2:
+    #   T1 best period < 0.5hr  → search from Nyquist floor (fast rotator)
+    #   T1 best period ≥ 0.5hr  → search from max(Nyquist, T1/4) (normal)
+    # This reduces grid from ~47k to ~5k for typical objects: 10× speedup.
+    t1_best    = t1result.best_period_mbls  # T1 MBLS best estimate
+    if t1_best < 0.5:
+        # genuinely fast rotator — keep full Nyquist-floor search
+        p_min  = data.period_min_hr
+        n_cap  = 50_000
+    else:
+        # normal rotator — focus grid around T1 result
+        # floor = T1/4 so we catch P/2 and P/3 harmonics
+        p_min  = max(data.period_min_hr, t1_best / 4.0)
+        n_cap  = 8_000   # 8k is plenty for a focused search
     p_max = min(cfg_p.period_max_hr, data.baseline_hr)
-    # 10× oversampling for Tier 2 refinement (Greenstreet standard)
     n_t2  = max(cfg_p.n_grid_fine,
                 int(10 * data.baseline_hr * (1.0/p_min - 1.0/p_max)))
-    n_t2  = min(n_t2, 50_000)  # cap to keep runtime reasonable
+    n_t2  = min(n_t2, n_cap)
     test_periods = np.linspace(p_min, p_max, n_t2)
 
     # ── 1. MHAOV adaptive NH — merged series ──────────────────────────────────

@@ -89,11 +89,14 @@ def run_tier1(
                        f"SNR={data.snr:.2f} < threshold={cfg_t.snr_threshold}")
 
     # ── Period grid ───────────────────────────────────────────────────────────
-    test_periods = np.linspace(
-        cfg_p.period_min_hr,
-        min(cfg_p.period_max_hr, data.baseline_hr),
-        cfg_p.n_grid_coarse,
-    )
+    # Tier 1 grid — full range from Nyquist floor to baseline
+    # Cap at 20k for fast rotators (p_min < 0.5hr), 5k for normal objects
+    p_min_t1 = data.period_min_hr
+    p_max_t1 = min(cfg_p.period_max_hr, data.baseline_hr)
+    n_t1     = max(cfg_p.n_grid_coarse,
+                   int(5 * data.baseline_hr * (1.0/p_min_t1 - 1.0/p_max_t1)))
+    n_t1     = min(n_t1, 20_000 if p_min_t1 < 0.5 else 5_000)
+    test_periods = np.linspace(p_min_t1, p_max_t1, n_t1)
 
     # ── GLS — uses merged, band-offset-corrected + detrended series ───────────
     gls_pow  = gls_periodogram(data.t_hrs, data.y_dt, data.dy, test_periods)
