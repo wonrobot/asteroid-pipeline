@@ -154,13 +154,20 @@ def run_tier2(
         mbls_pow  = mhaov_pow.copy()
         best_mbls = best_mhaov
 
-    # ── 3. Conditional Entropy — merged series ────────────────────────────────
+    # ── 3. Conditional Entropy — merged series, denser grid ──────────────────
+    # CE is a histogram method — needs denser sampling than MHAOV/MBLS
+    # to resolve close peaks. Use separate n_grid_ce (default 8k).
     logger.debug(f"{data.provid}: running Conditional Entropy...")
+    ce_periods = np.linspace(
+        cfg_p.period_min_hr,
+        min(cfg_p.period_max_hr, data.baseline_hr),
+        cfg_p.n_grid_ce,
+    )
     ce_scores = ce_periodogram(
-        data.t_hrs, data.y_dt, test_periods,
+        data.t_hrs, data.y_dt, ce_periods,
         n_phase=cfg_p.ce_n_phase, n_mag=cfg_p.ce_n_mag
     )
-    best_ce = test_periods[np.argmin(ce_scores)]
+    best_ce = ce_periods[np.argmin(ce_scores)]
 
     # ── Agreement check ───────────────────────────────────────────────────────
     agrees, spread_pct = check_agreement(best_mhaov, best_mbls, best_ce, cfg_t.agreement_tol)
@@ -392,14 +399,20 @@ def check_agreement(
     """
     Check whether period estimates agree within fractional tolerance.
 
-    Also handles the harmonic case: if MBLS (p2) applied the 2-minima
-    rule and doubled a P/2 alias, p2 will be ~2x p1 and/or p3.
-    We recognise this as a P/2 correction and declare agreement on p2.
+    Standard check: all 3 within tol → agree.
 
-    p1 = MHAOV, p2 = MBLS (may be doubled), p3 = CE
+    Harmonic cases (A, B, C): MBLS (p2) applied the 2-minima rule and
+    doubled a P/2 alias. These use tol_harmonic=2*tol for CE comparisons
+    because CE is a histogram method and inherently noisier than MHAOV/MBLS
+    near alias peaks. Greenstreet et al. (2026) use 10% agreement tolerance
+    between their two methods; our harmonic cases use the same threshold.
+
+    p1 = MHAOV, p2 = MBLS (may be doubled by 2-minima rule), p3 = CE
     Returns (agrees, spread_pct).
     """
-    # Standard check
+    tol_harmonic = tol * 2.0   # 10% for CE in harmonic cases (Greenstreet 2026)
+
+    # Standard check: all 3 within tol
     periods    = np.array([p1, p2, p3])
     median_p   = np.median(periods)
     spread_pct = float(np.max(np.abs(periods - median_p) / (median_p + 1e-12)))
@@ -407,21 +420,23 @@ def check_agreement(
     if spread_pct <= tol:
         return True, spread_pct
 
-    # Harmonic check: did MBLS double a P/2 alias?
-    # Case A: MBLS = 2*MHAOV AND MBLS = 2*CE
+    # Harmonic Cases A, B, C:
+    # MBLS doubled a P/2 alias — check harmonic relationships
     d_mhaov_half = abs(p2 - 2*p1) / (2*p1 + 1e-12)
     d_ce_half    = abs(p2 - 2*p3) / (2*p3 + 1e-12)
-    if d_mhaov_half <= tol and d_ce_half <= tol:
+    d_mbls_ce    = abs(p2 - p3)   / (p3   + 1e-12)
+    d_mbls_mhaov = abs(p2 - p1)   / (p1   + 1e-12)
+
+    # Case A: MBLS = 2*MHAOV AND MBLS = 2*CE (both others on P/2)
+    if d_mhaov_half <= tol and d_ce_half <= tol_harmonic:
         return True, float(max(d_mhaov_half, d_ce_half))
 
-    # Case B: MBLS = 2*MHAOV AND MBLS ≈ CE
-    d_mbls_ce = abs(p2 - p3) / (p3 + 1e-12)
-    if d_mhaov_half <= tol and d_mbls_ce <= tol:
+    # Case B: MBLS = 2*MHAOV AND MBLS ≈ CE (CE near doubled period)
+    if d_mhaov_half <= tol and d_mbls_ce <= tol_harmonic:
         return True, float(max(d_mhaov_half, d_mbls_ce))
 
     # Case C: MBLS = 2*CE AND MBLS ≈ MHAOV
-    d_mbls_mhaov = abs(p2 - p1) / (p1 + 1e-12)
-    if d_ce_half <= tol and d_mbls_mhaov <= tol:
+    if d_ce_half <= tol and d_mbls_mhaov <= tol_harmonic:
         return True, float(max(d_ce_half, d_mbls_mhaov))
 
     return False, spread_pct

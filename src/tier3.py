@@ -96,17 +96,14 @@ def run_tier3(
     config:   PipelineConfig = DEFAULT_CONFIG,
 ) -> Tier3Result:
     """
-    Run Tier 3 disambiguation on a single asteroid.
+    Run Tier 3 disambiguation using CLEAN periodogram only.
 
-    Parameters
-    ----------
-    data     : PreparedData from preprocessing.preprocess()
-    t2result : Tier2Result — must have to_tier3=True
-    config   : PipelineConfig
+    The Bayesian posterior was removed — it uses the same Fourier
+    chi-sq likelihood as MHAOV and is not independent. CLEAN is
+    genuinely independent: it deconvolves the spectral window function.
 
-    Returns
-    -------
-    Tier3Result
+    Decision: publish tentative if CLEAN confirms MBLS period
+    (peak ratio >= threshold AND CLEAN agrees with MBLS within tol).
     """
     if not t2result.to_tier3:
         raise ValueError(f"{data.provid}: Tier2 did not route to Tier3")
@@ -114,66 +111,71 @@ def run_tier3(
     cfg_p = config.period
     cfg_t = config.tier
 
-    # Reuse Tier 2 period grid
-    test_periods = t2result.test_periods
+    # Focused grid around Tier 2 candidates ± 20%
+    focused = []
+    for p_cand in [t2result.best_period_mhaov,
+                   t2result.best_period_mbls,
+                   t2result.best_period_ce]:
+        if not np.isnan(p_cand) and p_cand > 0:
+            lo = max(cfg_p.period_min_hr, p_cand * 0.80)
+            hi = min(cfg_p.period_max_hr, p_cand * 1.20)
+            focused.extend(np.linspace(lo, hi, 300).tolist())
 
-    # ── 1. Bayesian posterior ─────────────────────────────────────────────────
-    logger.debug(f"{data.provid}: computing Bayesian posterior...")
-    posterior    = bayesian_period_posterior(
-        data.t_hrs, data.y_dt, data.dy, test_periods, nh=cfg_p.mhaov_nh
-    )
-    best_bayes   = test_periods[np.argmax(posterior)]
-    ci_lo, ci_hi = compute_credible_interval(posterior, test_periods, alpha=0.95)
-    ci_width     = float(ci_hi - ci_lo)
+    focused_periods = (np.unique(np.sort(np.array(focused)))
+                       if len(focused) >= 10
+                       else t2result.test_periods)
 
-    # ── 2. CLEAN ──────────────────────────────────────────────────────────────
+    # CLEAN
     logger.debug(f"{data.provid}: running CLEAN...")
-    freqs       = 1.0 / test_periods[::-1]
-    clean_pow   = clean_periodogram(
+    freqs     = 1.0 / focused_periods[::-1]
+    clean_pow = clean_periodogram(
         data.t_hrs, data.y_dt, data.dy, freqs,
         gain=cfg_p.clean_gain, n_iter=cfg_p.clean_niter
     )
-    clean_pow   = clean_pow[::-1]
-    best_clean  = test_periods[np.argmax(clean_pow)]
-    peak_ratio  = _clean_peak_ratio(clean_pow)
+    clean_pow  = clean_pow[::-1]
+    best_clean = focused_periods[np.argmax(clean_pow)]
+    peak_ratio = _clean_peak_ratio(clean_pow)
+
+    # Best period = MBLS (has 2-minima correction applied)
+    best_mbls       = t2result.best_period_mbls
+    grid_step       = float(np.median(np.diff(focused_periods)))
+    ci_width        = grid_step * 3.0
+    ci_lo           = best_mbls - ci_width / 2.0
+    ci_hi           = best_mbls + ci_width / 2.0
+
+    clean_agrees = (abs(best_clean - best_mbls) /
+                    (best_mbls + 1e-12) <= cfg_t.agreement_tol)
+    clean_strong = peak_ratio >= cfg_t.clean_peak_ratio
 
     logger.debug(
-        f"{data.provid} Tier3: Bayes MAP={best_bayes:.3f}hr "
-        f"95%CI=[{ci_lo:.3f},{ci_hi:.3f}] width={ci_width:.3f}hr  "
-        f"CLEAN={best_clean:.3f}hr peak_ratio={peak_ratio:.1f}"
+        f"{data.provid} Tier3: CLEAN={best_clean:.3f}hr "
+        f"ratio={peak_ratio:.1f} MBLS={best_mbls:.3f}hr "
+        f"agrees={clean_agrees} strong={clean_strong}"
     )
 
-    # ── Decision ──────────────────────────────────────────────────────────────
-    ci_narrow     = ci_width < cfg_t.bayesian_ci_thresh
-    clean_clean   = peak_ratio >= cfg_t.clean_peak_ratio
-
-    if ci_narrow or clean_clean:
-        # Adopt Bayesian MAP as final period
-        final_period     = best_bayes
-        final_period_unc = ci_width / 2.0
+    if clean_agrees and clean_strong:
         return Tier3Result(
             provid=data.provid, publish_tentative=True, needs_followup=False,
-            best_period_bayes=best_bayes, best_period_clean=best_clean,
+            best_period_bayes=best_mbls, best_period_clean=best_clean,
             ci_lo=ci_lo, ci_hi=ci_hi, ci_width=ci_width,
             clean_peak_ratio=peak_ratio,
-            final_period=final_period, final_period_unc=final_period_unc,
+            final_period=best_mbls, final_period_unc=ci_width / 2.0,
             reliability="tentative",
-            test_periods=test_periods, posterior=posterior, clean_power=clean_pow,
+            test_periods=focused_periods, posterior=clean_pow,
+            clean_power=clean_pow,
         )
 
-    # Ambiguous — flag for follow-up
     return Tier3Result(
         provid=data.provid, publish_tentative=False, needs_followup=True,
-        best_period_bayes=best_bayes, best_period_clean=best_clean,
+        best_period_bayes=best_mbls, best_period_clean=best_clean,
         ci_lo=ci_lo, ci_hi=ci_hi, ci_width=ci_width,
         clean_peak_ratio=peak_ratio,
         final_period=np.nan, final_period_unc=np.nan,
         reliability="followup_needed",
-        test_periods=test_periods, posterior=posterior, clean_power=clean_pow,
+        test_periods=focused_periods, posterior=clean_pow,
+        clean_power=clean_pow,
     )
 
-
-# ── Bayesian posterior ────────────────────────────────────────────────────────
 
 def bayesian_period_posterior(
     t:            np.ndarray,

@@ -58,6 +58,7 @@ class PeriodConfig:
     period_max_hr:  float = 24.0
     n_grid_coarse:  int   = 2_000
     n_grid_fine:    int   = 3_000
+    n_grid_ce:      int   = 8_000   # CE needs denser grid (histogram method)
     samples_per_peak: int = 20
 
     mhaov_nh:       int = 2
