@@ -539,7 +539,7 @@ export default function App() {
               </div>
             )}
 
-            <AsteroidCharts provid={selected.provid} />
+            <div style={{marginTop:'16px'}}><AsteroidCharts provid={selected.provid} /></div>
           </div>
         )}
 
