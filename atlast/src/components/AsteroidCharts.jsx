@@ -43,7 +43,7 @@ const LOG_XAXIS = () => ({
 // Period marker as scatter trace with text label at top
 function pline(x, label, color, dash, maxPow) {
   return {
-    x:[x, x], y:[0, maxPow],
+    x:[x, x], y:[0, 1],
     mode:"lines+text",
     line:{color, width: dash==="solid"?2:1.5, dash},
     text:["", label],
@@ -138,6 +138,7 @@ export default function AsteroidCharts({ provid }) {
 
   /* ── Periodogram shared ── */
   const maxMBLS = Math.max(...pg.mbls_power);
+  const normTo1 = (arr, max) => arr.map(v => v / (max || 1));
   const xaxis   = LOG_XAXIS();
   const markers = periodMarkers(P, pg.periods, maxMBLS);
 
@@ -154,24 +155,21 @@ export default function AsteroidCharts({ provid }) {
 
   /* T1 — Generalised Lomb-Scargle + Multi-Band Lomb-Scargle */
   const maxGLS = pg.gls_power ? Math.max(...pg.gls_power) : 1;
-  const glsNorm = pg.gls_power ? pg.gls_power.map(v=>v/maxGLS*maxMBLS*0.7) : [];
   const t1Traces = [
     ...(P?markers:methodLines),
-    {x:pg.gls_periods||pg.periods, y:glsNorm, mode:"lines",
+    {x:pg.gls_periods||pg.periods, y:normTo1(pg.gls_power||[], maxGLS), mode:"lines",
       line:{color:"#0d9488",width:1,dash:"dash"}, name:"GLS", type:"scatter",showlegend:false},
-    {x:pg.periods, y:pg.mbls_power, mode:"lines",
+    {x:pg.periods, y:normTo1(pg.mbls_power, maxMBLS), mode:"lines",
       line:{color:"#1d4ed8",width:1.3}, name:"MBLS", type:"scatter",showlegend:false},
   ];
-  const glsPeak = pg.gls_power ? Math.max(...pg.gls_power).toFixed(3) : null;
 
   /* T2 — Multi-Harmonic AoV + Multi-Band Lomb-Scargle */
   const maxMHAOV = pg.mhaov_power ? Math.max(...pg.mhaov_power) : 1;
-  const mhaovNorm = pg.mhaov_power ? pg.mhaov_power.map(v=>v/maxMHAOV*maxMBLS*0.85) : [];
   const t2Traces = [
     ...(P?markers.map(m=>({...m,showlegend:false})):methodLines),
-    {x:pg.periods, y:mhaovNorm, mode:"lines",
+    {x:pg.periods, y:normTo1(pg.mhaov_power||[], maxMHAOV), mode:"lines",
       line:{color:"#9333ea",width:1.3,dash:"dot"}, name:"MHAOV", type:"scatter",showlegend:false},
-    {x:pg.periods, y:pg.mbls_power, mode:"lines",
+    {x:pg.periods, y:normTo1(pg.mbls_power, maxMBLS), mode:"lines",
       line:{color:"#ea580c",width:1.3}, name:"MBLS", type:"scatter",showlegend:false},
   ];
   const pval = pg.p_value;
@@ -189,13 +187,13 @@ export default function AsteroidCharts({ provid }) {
     ...(alias24in?[pline(23.5,"24h alias","#dc2626","dashdot",maxMBLS)]:[] ),
     ...(pg.window_periods&&pg.window_power ? [{
       x:pg.window_periods,
-      y:pg.window_power.map(v=>v/Math.max(...pg.window_power)*maxMBLS*0.35),
+      y:normTo1(pg.window_power, Math.max(...pg.window_power)),
       mode:"lines", line:{color:"#f59e0b",width:1},
       fill:"tozeroy", fillcolor:"rgba(245,158,11,0.08)",
       name:"Window", type:"scatter",showlegend:false,
     }] : []),
     ...(ceDetected && pg.ce_periods&&pg.ce_scores ? [{
-      x:pg.ce_periods, y:pg.ce_scores.map(v=>v/maxCE*maxMBLS*0.9),
+      x:pg.ce_periods, y:normTo1(pg.ce_scores, maxCE),
       mode:"lines", line:{color:"#0e7490",width:1.3},
       name:"CE", type:"scatter",showlegend:false,
     }] : []),
@@ -275,7 +273,7 @@ export default function AsteroidCharts({ provid }) {
           <Plot traces={t1Traces} layout={{
             ...BASE, margin:PLOT_MARGIN,
             xaxis:{...xaxis},
-            yaxis:{title:{text:"Power"},gridcolor:"#e8edf5",linecolor:"#cbd5e1"},
+            yaxis:{title:{text:"Normalised Power"},range:[0,1.05],gridcolor:"#e8edf5",linecolor:"#cbd5e1"},
           }} height={200}/>
 
         </TierSection>
@@ -290,7 +288,7 @@ export default function AsteroidCharts({ provid }) {
           <Plot traces={t2Traces} layout={{
             ...BASE, margin:PLOT_MARGIN,
             xaxis:{...xaxis},
-            yaxis:{title:{text:"Power"},gridcolor:"#e8edf5",linecolor:"#cbd5e1"},
+            yaxis:{title:{text:"Normalised Power"},range:[0,1.05],gridcolor:"#e8edf5",linecolor:"#cbd5e1"},
           }} height={200}/>
           {pval!=null && d.r_code!==0 && (
             <StatLine items={[{
@@ -314,7 +312,7 @@ export default function AsteroidCharts({ provid }) {
           <Plot traces={t3Traces} layout={{
             ...BASE, margin:PLOT_MARGIN,
             xaxis:{...xaxis},
-            yaxis:{title:{text:"Power / CE"},gridcolor:"#e8edf5",linecolor:"#cbd5e1"},
+            yaxis:{title:{text:"Normalised Power / CE"},range:[0,1.05],gridcolor:"#e8edf5",linecolor:"#cbd5e1"},
           }} height={200}/>
           {pg.ce_scores && (
             <StatLine items={[
