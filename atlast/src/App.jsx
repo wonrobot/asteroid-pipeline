@@ -405,7 +405,10 @@ export default function App() {
               <h1 className="logo" onClick={()=>{setPage("explore");setSelected(null);}} style={{cursor:"pointer"}}>ATL<span>AST</span></h1>
             </div>
             <p className="header-tagline">
-              Asteroid Temporal Lightcurve Analysis &amp; Spin Tracking · LSST commissioning data
+              Asteroid Temporal Lightcurve Analysis &amp; Spin Tracking
+            </p>
+            <p style={{fontSize:'0.72rem', color:T.textDim, marginTop:3, textAlign:'left'}}>
+              Rubin/LSST · First Look commissioning · Apr–May 2025
             </p>
           </div>
           <div style={{display:'flex',flexDirection:'column',gap:10,alignItems:'flex-end'}}>
@@ -425,7 +428,7 @@ export default function App() {
             </div>
             <div style={{display:'flex',gap:4,background:'#f1f5f9',
               borderRadius:8,padding:3,border:`1px solid ${T.border}`}}>
-              {[['explore','Population'],['catalog','Catalog']].map(([id,label])=>(
+              {[['explore','Population'],['catalog','Catalog'],['methods','Methodology'],['about','About']].map(([id,label])=>(
                 <button key={id}
                   onClick={()=>{setPage(id);setSelected(null);}}
                   style={{fontFamily:"Inter,sans-serif",fontSize:"0.72rem",
@@ -594,6 +597,36 @@ export default function App() {
             setPage('catalog');
             setTimeout(()=>detailRef.current?.scrollIntoView({behavior:'smooth',block:'start'}),40);
           }}/>
+        )}
+
+        {page === 'methods' && (
+          <div style={{padding:'64px 0',textAlign:'center'}}>
+            <div style={{fontSize:'2rem',marginBottom:16,opacity:0.15}}>⚗</div>
+            <div style={{fontSize:'0.9rem',fontWeight:600,color:T.textSec,marginBottom:8}}>Methodology</div>
+            <div style={{fontSize:'0.75rem',color:T.textDim,maxWidth:480,margin:'0 auto',lineHeight:1.8}}>
+              Pipeline documentation — 3-tier detection system (GLS, MBLS, MHAOV, CE),
+              R-code reliability framework, and validation results.
+              <br/><span style={{color:T.accent}}>Coming in next release.</span>
+            </div>
+          </div>
+        )}
+
+        {page === 'about' && (
+          <div style={{padding:'64px 0',textAlign:'center'}}>
+            <div style={{fontSize:'2rem',marginBottom:16,opacity:0.15}}>◎</div>
+            <div style={{fontSize:'0.9rem',fontWeight:600,color:T.textSec,marginBottom:8}}>About ATLAST</div>
+            <div style={{fontSize:'0.75rem',color:T.textDim,maxWidth:480,margin:'0 auto',lineHeight:1.8}}>
+              ATLAST is an open-source asteroid rotation period catalog built on
+              Rubin/LSST commissioning photometry, using a three-tier multi-method
+              detection pipeline validated against the LCDB.
+              <br/><br/>
+              <a href="https://github.com/wonrobot/asteroid-pipeline" target="_blank"
+                rel="noreferrer" style={{color:T.accent,textDecoration:'none'}}>
+                GitHub ↗
+              </a>
+              {' · '}Greenstreet et al. 2026
+            </div>
+          </div>
         )}
 
         {page === 'catalog' && <div className="tbl-wrap">
