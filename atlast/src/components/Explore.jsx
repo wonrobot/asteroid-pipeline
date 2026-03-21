@@ -103,20 +103,21 @@ function SpinSpectrum({catalog,onSelect}) {
 
   // Jitter y slightly so dots don't overlap
   const seed = (i) => (Math.sin(i*127.1)*43758.5453)%1;
-  const groups = ["3","2","1","-1"];
+  const groups = ["3","2","1","-1"].filter(rc=>
+    rows.some(r=>String(r.r_code)===rc));
   const traces = groups.map(rc => {
     const sub = rows.filter(r=>String(r.r_code)===rc);
     return {
       x: sub.map(r=>parseFloat(r.final_period_hr)),
-      y: sub.map((_,i)=>0.5+seed(i)*0.5),
+      y: sub.map((_,i)=>0.3+((i*0.618)%0.4)),
       text: sub.map(r=>r.provid),
       customdata: sub,
       mode:"markers",
       marker:{
         color: R_COLOR[rc],
         size: sub.map(r=>r.t2_amplitude_mag
-          ? Math.max(6, Math.min(18, parseFloat(r.t2_amplitude_mag)*10))
-          : 8),
+          ? Math.max(5, Math.min(14, parseFloat(r.t2_amplitude_mag)*8))
+          : 7),
         opacity:0.8,
         line:{color:"rgba(255,255,255,0.5)",width:0.8},
       },
@@ -147,10 +148,10 @@ function SpinSpectrum({catalog,onSelect}) {
   return (
     <Card title="Spin Spectrum"
       subtitle="Each dot = one asteroid · dot size ∝ lightcurve amplitude · click to explore">
-      <div style={{display:"flex",gap:12,flexWrap:"wrap",padding:"6px 20px 0"}}>
+      <div style={{display:"flex",gap:12,flexWrap:"wrap",padding:"6px 20px 0",alignItems:"center"}}>
         {groups.map(rc=><RDot key={rc} r={rc}/>)}
         <span style={{marginLeft:"auto",fontSize:"0.63rem",color:T.textDim}}>
-          size ∝ amplitude
+          size ∝ amplitude · hover for details
         </span>
       </div>
       <div ref={ref} style={{width:"100%",height:160}}/>
@@ -165,7 +166,8 @@ function AmpVsPeriod({catalog,onSelect}) {
     r.t2_amplitude_mag&&r.t2_amplitude_mag!==""&&
     String(r.r_code)!=="0"
   );
-  const groups=["3","2","1","-1"];
+  const groups=["3","2","1","-1"].filter(rc=>
+    rows.some(r=>String(r.r_code)===rc));
   const traces=groups.map(rc=>{
     const sub=rows.filter(r=>String(r.r_code)===rc);
     return {
@@ -188,8 +190,10 @@ function AmpVsPeriod({catalog,onSelect}) {
       Plotly.react(ref.current,traces,{
         ...BASE,
         margin:{t:16,b:44,l:58,r:16},
-        xaxis:{...GRID,title:{text:"Rotation period (hr)"},range:[0,25]},
-        yaxis:{...GRID,title:{text:"Lightcurve amplitude (mag)"}},
+        xaxis:{gridcolor:"#f8fafc",linecolor:"#e2e8f0",zeroline:false,
+          title:{text:"Rotation period (hr)"},range:[0,25]},
+        yaxis:{gridcolor:"#f8fafc",linecolor:"#e2e8f0",zeroline:false,
+          title:{text:"Lightcurve amplitude (mag)"}},
         shapes:[{...BARRIER,y0:undefined,y1:undefined,
           line:{...BARRIER.line,opacity:0.3}}],
       },{displayModeBar:false,responsive:true});
