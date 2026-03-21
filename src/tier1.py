@@ -137,15 +137,12 @@ def run_tier1(
         mbls_pow  = gls_pow.copy()
         best_mbls = best_gls
 
-    # ── Weak periodicity filter ───────────────────────────────────────────────
-    if gls_max < 0.05:
-        return Tier1Result(
-            provid=data.provid, passes=False,
-            best_period_gls=best_gls, best_period_mbls=best_mbls,
-            gls_power_max=gls_max, snr=data.snr, n_obs=data.n_obs,
-            reject_reason=f"GLS power={gls_max:.3f} too low — no periodic signal",
-            test_periods=test_periods, gls_power=gls_pow, mbls_power=mbls_pow,
-        )
+    # ── No power gate here ────────────────────────────────────────────────────
+    # T1 gates only on data quality (n_obs, SNR). Signal significance is
+    # tested in T2 via MHAOV F-statistic with real p-values from F-distribution.
+    # Raw power thresholds fail for fast rotators (non-sinusoidal → low GLS)
+    # and multi-band data. MK41 (P=0.063hr) has MHAOV p=7e-09 but GLS=0.046.
+    mbls_max = float(mbls_pow.max())
 
     logger.debug(
         f"{data.provid} Tier1: GLS best={best_gls:.3f}hr "
