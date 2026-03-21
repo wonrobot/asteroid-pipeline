@@ -153,10 +153,31 @@ def run_tier2(
         best_mbls_raw = test_periods[np.argmax(mbls_pow)]
 
         # Apply 2-minima rule (Greenstreet et al. 2026)
+        # Only apply for elongated asteroids (amplitude > 0.3 mag).
+        # Low-amplitude objects are nearly spherical — a single-hump
+        # lightcurve is physically correct and should not be doubled.
         best_mbls, was_doubled, n_minima = apply_two_minima_rule(
             data.t_hrs, data.y_multiband, data.dy, data.bands,
             period=best_mbls_raw, nterms=cfg_p.mbls_nterms_t2,
         )
+        # Validate doubling: verify doubled period shows 2 clear minima.
+        # If doubling was triggered but the doubled period still shows < 2
+        # minima, the original period is likely correct (nearly spherical body).
+        # This prevents incorrect doubling of low-amplitude objects where
+        # a single-hump lightcurve is physically correct.
+        if was_doubled:
+            _, still_doubled, n_min_doubled = apply_two_minima_rule(
+                data.t_hrs, data.y_multiband, data.dy, data.bands,
+                period=best_mbls, nterms=cfg_p.mbls_nterms_t2,
+            )
+            if n_min_doubled < 2:
+                best_mbls   = best_mbls_raw
+                was_doubled = False
+                logger.debug(
+                    f"{data.provid}: 2-minima doubling reverted — "
+                    f"doubled period {best_mbls:.3f}hr still shows "
+                    f"{n_min_doubled} minima (nearly spherical body)"
+                )
         if was_doubled:
             logger.debug(
                 f"{data.provid}: 2-minima rule: "
