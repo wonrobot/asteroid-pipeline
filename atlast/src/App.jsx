@@ -401,7 +401,7 @@ export default function App() {
         <header className="header">
           <div>
             <div className="logo-row">
-              <h1 className="logo">ATL<span>AST</span></h1>
+              <h1 className="logo" onClick={()=>{setPage("explore");setSelected(null);}} style={{cursor:"pointer"}}>ATL<span>AST</span></h1>
               <span className="logo-version">v0.1-beta · 76 objects</span>
             </div>
             <p className="header-tagline">
@@ -561,7 +561,7 @@ export default function App() {
           </div>
         )}
 
-        <div className="legend">
+        {page === "catalog" && <div className="legend">
           <span className="legend-lbl">R-code:</span>
           {[['3','High confidence'],['2','Moderate confidence'],['1','Tentative'],['0','No period'],[-1,'Alias suspected']].map(([r, desc]) => (
             <span key={r} title={desc} style={{ cursor: 'help' }}><RBadge code={r} /></span>
@@ -569,7 +569,7 @@ export default function App() {
           <span style={{ fontSize: '0.65rem', color: T.textDim, marginLeft: 4 }}>hover for meaning</span>
         </div>
 
-        <div className="controls">
+        {page === "catalog" && <div className="controls">
           <div className="filter-grp">
             {FILTERS.map(f => (
               <button key={f.id} className={`fbtn ${filter === f.id ? 'on' : ''}`} onClick={() => setFilter(f.id)}>
@@ -588,7 +588,7 @@ export default function App() {
           </div>
 
           <span className="count-label">{filtered.length} / {catalog.length}</span>
-        </div>
+        </div>}
 
         {page === 'explore' && (
           <Explore catalog={catalog} onSelect={(row)=>{
