@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import Papa from 'papaparse'
 import AsteroidCharts from './components/AsteroidCharts'
+import Explore from './components/Explore'
 
 /* ─────────────────────────────────────────────
    Design tokens — light scientific theme
@@ -356,6 +357,7 @@ const FILTERS = [
 
 export default function App() {
   const [catalog,  setCatalog]  = useState([])
+  const [page, setPage] = useState('explore')
   const [selected, setSelected] = useState(null)
   const [filter,   setFilter]   = useState('all')
   const [minP,     setMinP]     = useState(0)
@@ -408,18 +410,34 @@ export default function App() {
               using a three-tier multi-method detection pipeline.
             </p>
           </div>
-          <div className="stats-grid">
-            <div className="stat-cell">
-              <span className="stat-n">{catalog.length}</span>
-              <span className="stat-l">Observed</span>
+          <div style={{display:'flex',flexDirection:'column',gap:10,alignItems:'flex-end'}}>
+            <div className="stats-grid">
+              <div className="stat-cell">
+                <span className="stat-n">{catalog.length}</span>
+                <span className="stat-l">Observed</span>
+              </div>
+              <div className="stat-cell">
+                <span className="stat-n">{published.length}</span>
+                <span className="stat-l">Published</span>
+              </div>
+              <div className="stat-cell">
+                <span className="stat-n">{confirmed.length}</span>
+                <span className="stat-l">Confirmed</span>
+              </div>
             </div>
-            <div className="stat-cell">
-              <span className="stat-n">{published.length}</span>
-              <span className="stat-l">Published</span>
-            </div>
-            <div className="stat-cell">
-              <span className="stat-n">{confirmed.length}</span>
-              <span className="stat-l">Confirmed</span>
+            <div style={{display:'flex',gap:4,background:'#f1f5f9',
+              borderRadius:8,padding:3,border:`1px solid ${T.border}`}}>
+              {[['explore','Population'],['catalog','Catalog']].map(([id,label])=>(
+                <button key={id}
+                  onClick={()=>{setPage(id);setSelected(null);}}
+                  style={{fontFamily:"Inter,sans-serif",fontSize:"0.72rem",
+                    fontWeight:500,padding:"5px 16px",border:"none",
+                    borderRadius:6,cursor:"pointer",transition:"all 0.12s",
+                    background: page===id ? T.accent : "transparent",
+                    color: page===id ? "#fff" : T.textSec}}>
+                  {label}
+                </button>
+              ))}
             </div>
           </div>
         </header>
@@ -572,7 +590,15 @@ export default function App() {
           <span className="count-label">{filtered.length} / {catalog.length}</span>
         </div>
 
-        <div className="tbl-wrap">
+        {page === 'explore' && (
+          <Explore catalog={catalog} onSelect={(row)=>{
+            setSelected(row);
+            setPage('catalog');
+            setTimeout(()=>detailRef.current?.scrollIntoView({behavior:'smooth',block:'start'}),40);
+          }}/>
+        )}
+
+        {page === 'catalog' && <div className="tbl-wrap">
           <table>
             <thead>
               <tr>
@@ -603,7 +629,7 @@ export default function App() {
               ))}
             </tbody>
           </table>
-        </div>
+        </div>}
 
         <footer className="footer">
           <span>ATLAST · Rubin/LSST commissioning data · Apr–May 2025 · 3-tier pipeline</span>
