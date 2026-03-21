@@ -41,6 +41,7 @@ CATALOG_COLUMNS = [
     "t2_passes", "t2_to_tier3",
     "t2_mhaov_period_hr", "t2_mbls_period_hr", "t2_ce_period_hr",
     "t2_consensus_period_hr", "t2_F_stat", "t2_p_value", "t2_mbls_fap",
+    "t2_mbls_band_support_frac", "t2_mbls_n_bands_supporting",
     "t2_amplitude_mag", "t2_agreement", "t2_period_spread_pct",
     # Tier 3
     "t3_ran", "t3_publish_tentative", "t3_needs_followup",
@@ -125,6 +126,8 @@ def result_to_row(
             "t2_F_stat":            t2result.F_stat,
             "t2_p_value":           t2result.p_value,
             "t2_mbls_fap":          getattr(t2result, "mbls_fap", np.nan),
+            "t2_mbls_band_support_frac":    getattr(t2result, "mbls_band_support_frac", np.nan),
+            "t2_mbls_n_bands_supporting":   getattr(t2result, "mbls_n_bands_supporting", np.nan),
             "t2_amplitude_mag":     t2result.amplitude,
             "t2_agreement":         t2result.agreement,
             "t2_period_spread_pct": t2result.period_spread_pct,

@@ -80,6 +80,11 @@ from window import (
 
 logger = logging.getLogger(__name__)
 
+# Minimum per-band chi-sq improvement to count a band as 'supporting' the period.
+# 0.1 = weak but real signal in that band. Deliberately low — we want to know
+# if the band has ANY preference for this period, not if it alone would detect it.
+BAND_SUPPORT_THRESH = 0.10
+
 
 # ── Output dataclass ──────────────────────────────────────────────────────────
 
@@ -117,6 +122,9 @@ class Tier2Result:
     mbls_sig                : True if mbls_fap < cfg.tier.mbls_fap_thresh
     mhaov_sig               : True if p_value  < cfg.tier.mhaov_pval_thresh
     both_sig                : True if both significance gates passed
+    mbls_band_support       : per-band chi-sq improvement at consensus period
+    mbls_n_bands_supporting : number of bands with individual support score > threshold
+    mbls_band_support_frac  : fraction of bands supporting (0–1)
     """
     provid:                  str
     passes:                  bool
@@ -148,6 +156,10 @@ class Tier2Result:
     mbls_sig:                bool         # True if mbls_fap < mbls_fap_thresh
     mhaov_sig:               bool         # True if p_value < mhaov_pval_thresh
     both_sig:                bool         # True if both gates passed
+    # ── New: per-band MBLS support ────────────────────────────────────────────
+    mbls_band_support:       dict         # {band: chi-sq improvement score}
+    mbls_n_bands_supporting: int          # bands with score > BAND_SUPPORT_THRESH
+    mbls_band_support_frac:  float        # fraction of bands supporting [0-1]
 
 
 # ── Main Tier 2 entry point ───────────────────────────────────────────────────
@@ -328,6 +340,24 @@ def run_tier2(
     # ── Agreement check ────────────────────────────────────────────────────────
     agrees, spread_pct = check_agreement(best_mhaov, best_mbls, best_ce, cfg_t.agreement_tol)
 
+    # ── MBLS per-band support at consensus period ────────────────────────────
+    # Fit MBLS at the current consensus period estimate and check whether each
+    # band individually prefers this period over a flat (constant) model.
+    # This is computed here using the pre-consensus estimate; it will be used
+    # downstream in reliability.py to distinguish two_of_three cases where
+    # multiple bands all agree (higher confidence) from cases where only one
+    # band drives the MBLS result (lower confidence).
+    band_support, n_bands_supporting, band_support_frac = compute_mbls_band_support(
+        data.t_hrs, data.y_multiband, data.dy, data.bands,
+        period=float(best_mbls),
+        nterms=cfg_p.mbls_nterms_t2,
+    )
+    logger.debug(
+        f"{data.provid}: MBLS band support at {best_mbls:.3f}hr: "
+        f"{band_support} → {n_bands_supporting}/{len(band_support)} bands "
+        f"(frac={band_support_frac:.2f})"
+    )
+
     # ── Consensus period — prefer least window-contaminated estimate ──────────
     # When methods agree, instead of a plain median we weight toward the
     # estimate with lowest cadence-alias contamination. This prevents the
@@ -390,6 +420,9 @@ def run_tier2(
             mbls_sig=mbls_sig,
             mhaov_sig=mhaov_sig,
             both_sig=both_sig,
+            mbls_band_support=band_support,
+            mbls_n_bands_supporting=n_bands_supporting,
+            mbls_band_support_frac=band_support_frac,
         )
 
     # ── Hard reject: neither gate significant and methods disagree ───────────
@@ -521,6 +554,97 @@ def compute_mbls_fap(
 
     return float(n_exceed) / float(n_perm)
 
+
+
+# ── MBLS per-band support ─────────────────────────────────────────────────────
+
+def compute_mbls_band_support(
+    t:       np.ndarray,
+    y:       np.ndarray,
+    dy:      np.ndarray,
+    bands:   np.ndarray,
+    period:  float,
+    nterms:  int = 2,
+) -> tuple:
+    """
+    Compute per-band chi-sq improvement of MBLS fit at a given period.
+
+    For each photometric band, measures how much better a Fourier model at
+    `period` fits the data compared to a flat (constant) model. A band
+    "supports" the period if its improvement exceeds BAND_SUPPORT_THRESH.
+
+    This is the key quantity for Change 5: in the two_of_three reliability
+    path (MHAOV+MBLS agree, CE disagrees), we check whether multiple bands
+    independently agree on the period. If so, the CE disagreement is more
+    likely to be a CE limitation (histogram under-sampling) than evidence
+    against the period.
+
+    Why chi-sq improvement per band?
+    ---------------------------------
+    MBLS maximises joint chi-sq across all bands simultaneously. The global
+    result could be driven by one band with many observations while another
+    band is essentially flat. Per-band chi-sq improvement isolates each
+    band's individual contribution to the detection.
+
+    Parameters
+    ----------
+    period  : period to evaluate (hours) — typically the MBLS consensus period
+    nterms  : Fourier terms (match what was used for the MBLS periodogram)
+
+    Returns
+    -------
+    band_support        : dict {band_name: chi_sq_improvement_fraction}
+                          Values in [0, 1]: 0 = flat fits as well as periodic,
+                          1 = periodic model explains all variance.
+    n_bands_supporting  : int — number of bands with score > BAND_SUPPORT_THRESH
+    band_support_frac   : float — n_bands_supporting / n_bands_total
+    """
+    from gatspy.periodic import LombScargleMultiband
+
+    unique_bands = np.unique(bands)
+    band_support = {}
+
+    for band in unique_bands:
+        mask = bands == band
+        t_b  = t[mask]
+        y_b  = y[mask]
+        dy_b = dy[mask]
+
+        if len(t_b) < 4:
+            band_support[str(band)] = 0.0
+            continue
+
+        w     = 1.0 / dy_b**2
+        y_wm  = float(np.average(y_b, weights=w))
+        ss_tot = float(np.sum(w * (y_b - y_wm)**2))
+
+        if ss_tot < 1e-12:
+            band_support[str(band)] = 0.0
+            continue
+
+        # Fit Fourier model at this period for this band alone
+        ph = 2.0 * np.pi * t_b / period
+        cols = [np.ones(len(t_b))]
+        for k in range(1, nterms + 1):
+            cols += [np.cos(k * ph), np.sin(k * ph)]
+        A = np.column_stack(cols)
+
+        try:
+            Aw     = A * w[:, None]
+            coeffs = np.linalg.lstsq(Aw.T @ A, Aw.T @ y_b, rcond=None)[0]
+            y_fit  = A @ coeffs
+            ss_res = float(np.sum(w * (y_b - y_fit)**2))
+            improvement = float(np.clip(1.0 - ss_res / ss_tot, 0.0, 1.0))
+        except (np.linalg.LinAlgError, ValueError):
+            improvement = 0.0
+
+        band_support[str(band)] = improvement
+
+    n_total     = len(unique_bands)
+    n_supporting = sum(1 for v in band_support.values() if v >= BAND_SUPPORT_THRESH)
+    frac         = float(n_supporting) / float(n_total) if n_total > 0 else 0.0
+
+    return band_support, n_supporting, frac
 
 # ── Contamination-weighted consensus ─────────────────────────────────────────
 

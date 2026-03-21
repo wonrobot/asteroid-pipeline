@@ -209,11 +209,37 @@ of recomputing — eliminating a redundant GLS-on-ones call.
   `should_expand` replaces the old `if (near_boundary or weak_power)` condition;
   window reused on non-expanded path, recomputed on expanded path.
 
+### Change 5 — MBLS per-band support in two_of_three reliability path
+*Commit: (this commit)*
+
+Previously, when MHAOV+MBLS agreed but CE disagreed (`two_of_three`), the
+result was always capped at R=1 regardless of how many photometric bands
+individually supported the period.
+
+Fix: compute per-band chi-sq improvement at the consensus period. Each band's
+improvement over a flat model is measured independently. If ≥67% of bands
+individually support the period AND both significance gates fired AND the data
+regime is not sparse, the CE disagreement is reinterpreted as a CE limitation
+(histogram under-sampling) rather than evidence against the period → R=2.
+
+**Upgrade conditions (all three required):**
+1. `both_sig` — both MHAOV and MBLS find the signal significant
+2. `mbls_band_support_frac >= 0.67` — at least 2 of 3 bands individually prefer this period
+3. `regime` not sparse or unknown
+
+R=1 otherwise — CE disagreement is still taken seriously when support is weak.
+
+- **tier2**: `compute_mbls_band_support()` fits MBLS at the consensus period and
+  measures each band's chi-sq improvement; `BAND_SUPPORT_THRESH=0.10`;
+  `Tier2Result` gains `mbls_band_support`, `mbls_n_bands_supporting`, `mbls_band_support_frac`.
+- **reliability**: `two_of_three` block now branches on `strong_multiband`;
+  safe defaults (`mbls_band_support_frac=0.0`) ensure backward compatibility.
+- **catalog**: `t2_mbls_band_support_frac`, `t2_mbls_n_bands_supporting` columns added.
+
 ### Planned
 
 - **Change 3**: Validate 0.5hr and 0.15 power thresholds against LCDB
   known-period asteroids. These are currently hardcoded heuristics.
-- **Change 5**: MBLS per-band support weight in `two_of_three` reliability path.
 
 ## Notes on missing fields
 

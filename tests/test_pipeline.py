@@ -647,3 +647,108 @@ class TestPass2Suppression:
             assert hasattr(t1, field), f"Tier1Result missing {field}"
         if t1.passes:
             assert len(t1.window_power) == len(t1.test_periods)
+
+
+# ── Tests: MBLS per-band support (Change 5) ───────────────────────────────────
+
+class TestMBLSBandSupport:
+    def test_band_support_scores_in_range(self):
+        """Per-band chi-sq improvement must be in [0, 1] for all bands."""
+        from tier2 import compute_mbls_band_support
+        from preprocessing import preprocess
+        df   = make_synthetic_lc(period_hr=4.8, amplitude=0.4, noise=0.02, n_obs=120)
+        data = preprocess(df, DEFAULT_CONFIG)
+        support, n_sup, frac = compute_mbls_band_support(
+            data.t_hrs, data.y_multiband, data.dy, data.bands,
+            period=4.8, nterms=2,
+        )
+        for band, score in support.items():
+            assert 0.0 <= score <= 1.0, f"Band {band} score {score} out of [0,1]"
+
+    def test_band_support_frac_consistent(self):
+        """band_support_frac must equal n_bands_supporting / total bands."""
+        from tier2 import compute_mbls_band_support, BAND_SUPPORT_THRESH
+        from preprocessing import preprocess
+        df   = make_synthetic_lc(period_hr=4.8, amplitude=0.4, noise=0.02, n_obs=120)
+        data = preprocess(df, DEFAULT_CONFIG)
+        support, n_sup, frac = compute_mbls_band_support(
+            data.t_hrs, data.y_multiband, data.dy, data.bands,
+            period=4.8, nterms=2,
+        )
+        n_total = len(support)
+        expected_n = sum(1 for v in support.values() if v >= BAND_SUPPORT_THRESH)
+        assert n_sup == expected_n, f"n_bands_supporting={n_sup} != {expected_n}"
+        assert abs(frac - expected_n / n_total) < 1e-9, \
+            f"band_support_frac={frac} inconsistent with counts"
+
+    def test_high_amplitude_gives_high_support(self):
+        """High amplitude signal should give high per-band support scores."""
+        from tier2 import compute_mbls_band_support
+        from preprocessing import preprocess
+        df_hi = make_synthetic_lc(period_hr=4.8, amplitude=0.6, noise=0.01, n_obs=150)
+        df_lo = make_synthetic_lc(period_hr=4.8, amplitude=0.02, noise=0.05, n_obs=150)
+        data_hi = preprocess(df_hi, DEFAULT_CONFIG)
+        data_lo = preprocess(df_lo, DEFAULT_CONFIG)
+        _, n_hi, frac_hi = compute_mbls_band_support(
+            data_hi.t_hrs, data_hi.y_multiband, data_hi.dy, data_hi.bands,
+            period=4.8, nterms=2,
+        )
+        _, n_lo, frac_lo = compute_mbls_band_support(
+            data_lo.t_hrs, data_lo.y_multiband, data_lo.dy, data_lo.bands,
+            period=4.8, nterms=2,
+        )
+        assert frac_hi >= frac_lo, \
+            f"High amplitude frac={frac_hi} not >= low amplitude frac={frac_lo}"
+
+    def test_wrong_period_gives_low_support(self):
+        """Wrong period should give lower support scores than true period."""
+        from tier2 import compute_mbls_band_support
+        from preprocessing import preprocess
+        df   = make_synthetic_lc(period_hr=4.8, amplitude=0.5, noise=0.02, n_obs=150)
+        data = preprocess(df, DEFAULT_CONFIG)
+        _, _, frac_true  = compute_mbls_band_support(
+            data.t_hrs, data.y_multiband, data.dy, data.bands,
+            period=4.8, nterms=2,
+        )
+        _, _, frac_wrong = compute_mbls_band_support(
+            data.t_hrs, data.y_multiband, data.dy, data.bands,
+            period=7.7, nterms=2,
+        )
+        assert frac_true >= frac_wrong, \
+            f"True period frac={frac_true} not >= wrong period frac={frac_wrong}"
+
+    def test_tier2_result_has_band_support_fields(self):
+        """Tier2Result must carry mbls_band_support, n_bands_supporting, frac."""
+        from tier1 import run_tier1
+        from tier2 import run_tier2
+        from preprocessing import preprocess
+        df   = make_synthetic_lc(period_hr=4.8, amplitude=0.4, noise=0.02, n_obs=120)
+        data = preprocess(df, DEFAULT_CONFIG)
+        t1   = run_tier1(data, DEFAULT_CONFIG)
+        if not t1.passes:
+            pytest.skip("Tier 1 rejected")
+        t2 = run_tier2(data, t1, DEFAULT_CONFIG)
+        assert hasattr(t2, 'mbls_band_support'),       "missing mbls_band_support"
+        assert hasattr(t2, 'mbls_n_bands_supporting'), "missing mbls_n_bands_supporting"
+        assert hasattr(t2, 'mbls_band_support_frac'),  "missing mbls_band_support_frac"
+        assert isinstance(t2.mbls_band_support, dict), "mbls_band_support not a dict"
+        assert 0.0 <= t2.mbls_band_support_frac <= 1.0, \
+            f"mbls_band_support_frac={t2.mbls_band_support_frac} out of [0,1]"
+
+    def test_catalog_has_band_support_columns(self):
+        """CATALOG_COLUMNS must include band support fields."""
+        from catalog import CATALOG_COLUMNS
+        assert "t2_mbls_band_support_frac"  in CATALOG_COLUMNS
+        assert "t2_mbls_n_bands_supporting" in CATALOG_COLUMNS
+
+    def test_two_of_three_upgrade_requires_strong_multiband(self):
+        """
+        R=2 in two_of_three path requires both_sig AND band_support_frac>=0.67.
+        Verify the condition exists in source.
+        """
+        with open('src/reliability.py') as f:
+            src = f.read()
+        assert 'strong_multiband' in src
+        assert 'mbls_band_support_frac >= 0.67' in src
+        assert 'both_sig' in src
+        assert 'regime not in ("sparse", "unknown")' in src

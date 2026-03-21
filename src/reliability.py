@@ -242,6 +242,8 @@ def compute_reliability(
         consensus_contamination = getattr(t2result, 'consensus_contamination', np.nan),
         both_sig            = getattr(t2result, 'both_sig', False),
         mbls_fap            = getattr(t2result, 'mbls_fap', np.nan),
+        mbls_band_support_frac    = getattr(t2result, 'mbls_band_support_frac', 0.0),
+        mbls_n_bands_supporting   = getattr(t2result, 'mbls_n_bands_supporting', 0),
     )
 
     # ── Build r_flag string ───────────────────────────────────────────────────
@@ -287,6 +289,8 @@ def _compute_r_code(
     consensus_contamination=np.nan,
     both_sig=False,
     mbls_fap=np.nan,
+    mbls_band_support_frac=0.0,
+    mbls_n_bands_supporting=0,
 ) -> tuple:
     """
     Core R code decision logic. Returns (r_code, notes_string).
@@ -349,11 +353,50 @@ def _compute_r_code(
         two_of_three_flag = (agreement == "two_of_three")
 
         if two_of_three_flag:
-            r = 1
-            note = _note(
-                f"MHAOV+MBLS agree (spread={period_spread*100:.1f}%), "
-                f"CE disagrees. p={p_value:.2e}. Publish as tentative (R=1)."
+            # CE disagrees — but evaluate how strongly multi-band MBLS supports
+            # the period. If multiple bands independently agree AND both
+            # significance gates fire, the CE disagreement is more likely a
+            # CE limitation (histogram under-sampling, especially for short
+            # baselines or fast rotators) than evidence against the period.
+            #
+            # Upgrade to R=2 only if ALL THREE conditions hold:
+            #   1. both_sig     — both MHAOV and MBLS find the signal significant
+            #   2. band_support_frac >= 0.67 — at least 2/3 of bands individually
+            #                                  prefer this period over flat model
+            #   3. regime not sparse — sparse data can't support multi-band claim
+            #
+            # Otherwise R=1 (unchanged from before).
+            strong_multiband = (
+                both_sig
+                and mbls_band_support_frac >= 0.67
+                and regime not in ("sparse", "unknown")
             )
+            if strong_multiband:
+                r = 2
+                note = _note(
+                    f"MHAOV+MBLS agree (spread={period_spread*100:.1f}%), "
+                    f"CE disagrees. Both gates significant "
+                    f"(MHAOV p={p_value:.2e}, MBLS FAP={mbls_fap:.4f}). "
+                    f"{mbls_n_bands_supporting} of {int(round(1/mbls_band_support_frac * mbls_n_bands_supporting)) if mbls_band_support_frac > 0 else '?'} bands "
+                    f"individually support period (frac={mbls_band_support_frac:.2f}). "
+                    f"CE likely limited by histogram sampling. Moderate confidence (R=2)."
+                )
+            else:
+                r = 1
+                reasons = []
+                if not both_sig:
+                    reasons.append(f"not both gates significant "
+                                   f"(MHAOV p={p_value:.2e}, MBLS FAP={mbls_fap:.4f})")
+                if mbls_band_support_frac < 0.67:
+                    reasons.append(f"only {mbls_band_support_frac:.0%} of bands support period")
+                if regime in ("sparse", "unknown"):
+                    reasons.append(f"regime={regime}")
+                note = _note(
+                    f"MHAOV+MBLS agree (spread={period_spread*100:.1f}%), "
+                    f"CE disagrees. "
+                    + ("; ".join(reasons) + ". " if reasons else "")
+                    + "Publish as tentative (R=1)."
+                )
             return min(r, ceiling), note
 
         if regime in ("dense", "rich_multiyear", "combined"):
