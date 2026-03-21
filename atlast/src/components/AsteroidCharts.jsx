@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import Plotly from "plotly.js-dist";
 
-const BC = { g:"#22c55e", r:"#f97316", i:"#3b82f6" };
-const BAND_LONG = { g:"g-band (480nm)", r:"r-band (620nm)", i:"i-band (750nm)" };
+const BC = { g:"#22c55e", r:"#f97316", i:"#3b82f6",
+  Lg:"#22c55e", Lr:"#f97316", Li:"#3b82f6" };
+const BAND_LONG = { g:"g-band (480nm)", r:"r-band (620nm)", i:"i-band (750nm)",
+  Lg:"g-band (480nm)", Lr:"r-band (620nm)", Li:"i-band (750nm)" };
 
 function normArr(arr, max) {
   if (!arr||!arr.length) return [];
@@ -71,7 +73,7 @@ function PMarkers({P}) {
   );
   return (
     <div style={{display:"flex",gap:14,flexWrap:"wrap",padding:"0 0 4px"}}>
-      {mk(P,      "#111827",`P = ${P.toFixed(3)} hr`)}
+      {mk(P,      "#1e3a5f",`P = ${P.toFixed(3)} hr`)}
       {mk(P/2,    "#d97706",`P/2 = ${(P/2).toFixed(3)} hr`)}
       {mk(P*2,    "#d97706",`2P = ${(P*2).toFixed(3)} hr`)}
     </div>
@@ -115,7 +117,7 @@ export default function AsteroidCharts({provid}) {
 
   // Shared period lines
   const pLines = P ? [
-    vline(P,    "#111827","solid"),
+    vline(P,    "#1e3a5f","solid"),
     vline(P/2,  "#d97706","dot"),
     vline(P*2,  "#d97706","dot"),
   ].filter(l=>l.x[0]>=0.3&&l.x[0]<=25) : [];
@@ -151,7 +153,7 @@ export default function AsteroidCharts({provid}) {
   ];
   const maxWin = pg.window_power?Math.max(...pg.window_power):1;
   const t3 = [...aLines,
-    vline(12,"#fca5a5","dashdot"), vline(23.5,"#fca5a5","dashdot"),
+    vline(12,"#ef4444","dashdot"), vline(23.5,"#ef4444","dashdot"),
     ...(pg.window_periods&&pg.window_power?[{
       x:pg.window_periods,y:normArr(pg.window_power,maxWin),
       mode:"lines",line:{color:"#f59e0b",width:1},
@@ -177,7 +179,7 @@ export default function AsteroidCharts({provid}) {
       mode:"markers",marker:{color:BC[b],size:3.5,opacity:0.85},
       type:"scatter",showlegend:false})),
     {x:d.fold.fitted_phase,y:d.fold.fitted_mag,
-      mode:"lines",line:{color:"#111827",width:2},type:"scatter",showlegend:false},
+      mode:"lines",line:{color:"#1e3a5f",width:2},type:"scatter",showlegend:false},
   ]:null;
 
   const residT = d.fold?bands.map(b=>{
@@ -190,8 +192,9 @@ export default function AsteroidCharts({provid}) {
       type:"scatter",showlegend:false};
   }):null;
 
+  const mjd0 = Math.min(...d.obs.mjd);
   const lcT = bands.map(b=>({
-    x:d.obs.mjd.filter((_,i)=>d.obs.band[i]===b),
+    x:d.obs.mjd.filter((_,i)=>d.obs.band[i]===b).map(m=>+(m-mjd0).toFixed(4)),
     y:d.obs.mag.filter((_,i)=>d.obs.band[i]===b),
     error_y:{type:"data",array:d.obs.magerr.filter((_,i)=>d.obs.band[i]===b),
       visible:true,color:BC[b]+"44",thickness:1},
@@ -235,7 +238,7 @@ export default function AsteroidCharts({provid}) {
       {tab==="fold"&&d.fold&&<>
         <Row>
           {bands.map(b=><Chip key={b} color={BC[b]} label={BAND_LONG[b]||b}/>)}
-          <Chip color="#111827" label="fitted model"/>
+          <Chip color="#1e3a5f" label="fitted model"/>
         </Row>
         <div style={{display:"flex",flexDirection:"column"}}>
           <PlotDiv traces={foldT} height={250} layout={{
@@ -259,14 +262,14 @@ export default function AsteroidCharts({provid}) {
         <TierLabel n={1} name="Fast Scan"/>
         <Row>
           <Chip color="#1d4ed8" label="Multi-Band Lomb-Scargle (MBLS)"/>
-          <Chip color="#0d9488" label="Generalised Lomb-Scargle (GLS, norm.)"/>
+          <Chip color="#0d9488" label="Generalised Lomb-Scargle (GLS)"/>
         </Row>
         <PlotDiv traces={t1} height={175} layout={pgLayout}/>
 
         <TierLabel n={2} name="High-Order Methods"/>
         <Row>
           <Chip color="#ea580c" label="Multi-Band Lomb-Scargle (MBLS)"/>
-          <Chip color="#9333ea" label="Multi-Harmonic AoV (MHAOV, norm.)"/>
+          <Chip color="#9333ea" label="Multi-Harmonic AoV (MHAOV)"/>
           {sigStars&&d.r_code!==0&&(
             <span style={{marginLeft:"auto",fontSize:"0.65rem",
               color:sigColor,fontFamily:"JetBrains Mono,monospace",fontWeight:600}}>
@@ -278,9 +281,9 @@ export default function AsteroidCharts({provid}) {
 
         <TierLabel n={3} name="Conditional Entropy · Window Function"/>
         <Row>
-          {ceOK&&<Chip color="#0e7490" label="Conditional Entropy (CE, norm.)"/>}
-          <Chip color="#f59e0b" label="Window function (norm.)"/>
-          <Chip color="#fca5a5" label="12h · 24h aliases"/>
+          {ceOK&&<Chip color="#0e7490" label="Conditional Entropy (CE)"/>}
+          <Chip color="#f59e0b" label="Window function "/>
+          <Chip color="#ef4444" label="12h · 24h aliases"/>
           {!ceOK&&(
             <span style={{fontSize:"0.65rem",color:"#94a3b8",
               fontFamily:"Inter,sans-serif",fontStyle:"italic"}}>
@@ -299,7 +302,7 @@ export default function AsteroidCharts({provid}) {
         </Row>
         <PlotDiv traces={lcT} height={270} layout={{
           ...BASE,
-          xaxis:{...XY,title:{text:"MJD"}},
+          xaxis:{...XY,title:{text:"Days since first observation"}},
           yaxis:{...XY,title:{text:"Magnitude"},autorange:"reversed"},
         }}/>
       </>}
