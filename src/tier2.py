@@ -153,31 +153,43 @@ def run_tier2(
         best_mbls_raw = test_periods[np.argmax(mbls_pow)]
 
         # Apply 2-minima rule (Greenstreet et al. 2026)
-        # Only apply for elongated asteroids (amplitude > 0.3 mag).
-        # Low-amplitude objects are nearly spherical — a single-hump
-        # lightcurve is physically correct and should not be doubled.
-        best_mbls, was_doubled, n_minima = apply_two_minima_rule(
-            data.t_hrs, data.y_multiband, data.dy, data.bands,
-            period=best_mbls_raw, nterms=cfg_p.mbls_nterms_t2,
-        )
-        # Validate doubling: verify doubled period shows 2 clear minima.
-        # If doubling was triggered but the doubled period still shows < 2
-        # minima, the original period is likely correct (nearly spherical body).
-        # This prevents incorrect doubling of low-amplitude objects where
-        # a single-hump lightcurve is physically correct.
-        if was_doubled:
-            _, still_doubled, n_min_doubled = apply_two_minima_rule(
+        # Only apply when MHAOV and MBLS agree on the pre-doubling period.
+        # If methods already disagree, doubling MBLS is unreliable —
+        # the coarse period estimate may be wrong, making minima-counting
+        # meaningless. Example: MM37 MBLS=1.848hr vs MHAOV=3.008hr →
+        # skip doubling, let T3/reliability handle the disagreement.
+        d_mhaov_mbls_raw    = abs(best_mhaov - best_mbls_raw) / max(best_mbls_raw, 1e-6)
+        d_mhaov_mbls_double = abs(best_mhaov - 2*best_mbls_raw) / max(best_mbls_raw, 1e-6)
+
+        # Three cases for 2-minima rule:
+        # 1. MHAOV ≈ MBLS_raw: methods agree → apply rule normally
+        # 2. MHAOV ≈ 2×MBLS_raw: MHAOV found doubled period, MBLS found P/2
+        #    → apply rule (expected to double MBLS to match MHAOV)
+        # 3. Neither: genuine disagreement → skip rule, let T3 resolve
+        apply_rule = (d_mhaov_mbls_raw    <= cfg_t.agreement_tol or
+                      d_mhaov_mbls_double <= cfg_t.agreement_tol)
+
+        if apply_rule:
+            best_mbls, was_doubled, n_minima = apply_two_minima_rule(
                 data.t_hrs, data.y_multiband, data.dy, data.bands,
-                period=best_mbls, nterms=cfg_p.mbls_nterms_t2,
+                period=best_mbls_raw, nterms=cfg_p.mbls_nterms_t2,
             )
-            if n_min_doubled < 2:
-                best_mbls   = best_mbls_raw
-                was_doubled = False
-                logger.debug(
-                    f"{data.provid}: 2-minima doubling reverted — "
-                    f"doubled period {best_mbls:.3f}hr still shows "
-                    f"{n_min_doubled} minima (nearly spherical body)"
-                )
+            logger.debug(
+                f"{data.provid}: 2-minima rule applied "
+                f"(MHAOV={best_mhaov:.3f}hr, MBLS={best_mbls_raw:.3f}hr "
+                f"d={d_mhaov_mbls_raw:.1%} d2x={d_mhaov_mbls_double:.1%}) → "
+                f"{'doubled to ' + str(round(best_mbls,3)) if was_doubled else 'kept at ' + str(round(best_mbls_raw,3))}"
+            )
+        else:
+            best_mbls   = best_mbls_raw
+            was_doubled = False
+            n_minima    = -1
+            logger.debug(
+                f"{data.provid}: 2-minima rule skipped — "
+                f"MHAOV={best_mhaov:.3f}hr vs MBLS={best_mbls_raw:.3f}hr "
+                f"genuine disagreement (d={d_mhaov_mbls_raw:.1%}, "
+                f"d2x={d_mhaov_mbls_double:.1%})"
+            )
         if was_doubled:
             logger.debug(
                 f"{data.provid}: 2-minima rule: "
