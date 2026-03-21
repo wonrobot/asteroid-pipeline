@@ -114,12 +114,29 @@ export default function AsteroidCharts({ provid, period }) {
 
   /* ── Periodogram — 3 stacked panels sharing period markers ── */
   const markers = periodMarkers(P, pg.periods);
+
+  // For R=0 / no best_period: show each method's period as lines to visualise disagreement
+  const METHOD_COLORS = {mhaov:"#7c3aed", mbls:"#2563eb", ce:"#0891b2", gls:"#059669"};
+  const methodLines = (() => {
+    if (!d.method_periods) return [];
+    const mn = Math.min(...pg.periods), mx = Math.max(...pg.periods);
+    const maxPow = Math.max(...pg.mbls_power);
+    return Object.entries(d.method_periods)
+      .filter(([,v])=>v&&v>=mn&&v<=mx)
+      .map(([name,val])=>({
+        x:[val,val], y:[0,maxPow], mode:"lines",
+        line:{color:METHOD_COLORS[name]||"#94a3b8", width:1.5, dash:"dashdot"},
+        name:`${name.toUpperCase()} ${val.toFixed(3)}h`,
+        type:"scatter", showlegend:true,
+      }));
+  })();
   const xaxis_shared = {title:{text:"Period (hr)"},type:"log",gridcolor:"#e8edf5",linecolor:"#cbd5e1",
     range: pg.periods ? [Math.log10(Math.min(...pg.periods)), Math.log10(Math.max(...pg.periods))] : undefined};
 
   // Panel 1 — Tier 1 fast scan
   const t1max = Math.max(...pg.mbls_power);
   const t1Traces = [
+    ...(P ? [] : methodLines),
     {x:pg.gls_periods||pg.periods, y:pg.gls_power||[], mode:"lines", line:{color:"#059669",width:1,dash:"dash"}, name:"GLS", type:"scatter"},
     {x:pg.periods, y:pg.mbls_power, mode:"lines", line:{color:"#2563eb",width:1.2}, name:"MBLS (T1)", type:"scatter"},
     ...markers,
