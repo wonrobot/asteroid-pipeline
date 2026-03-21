@@ -241,6 +241,12 @@ export default function AsteroidCharts({ provid, period }) {
           yaxis:{title:{text:"Power"},gridcolor:"#e8edf5",linecolor:"#cbd5e1"},
           legend:{...BASE.legend, x:1.02, xanchor:"left", y:1},
         }} height={200}/>
+        {d.r_code !== 0 && d.pgram.p_value !== undefined && (
+          <div style={{fontSize:"0.7rem",color:"#475569",padding:"3px 10px 6px",
+            fontFamily:"JetBrains Mono,monospace",display:"flex",gap:16}}>
+            <span>MHAOV significance: <strong>p = {d.pgram.p_value?.toExponential(2)}</strong></span>
+          </div>
+        )}
         <div style={S.divider}/>
         <div style={S.pgTitle}>Tier 3 — {pg.ce_periods?"Conditional Entropy (CE)":"Window function"}</div>
         <Plot traces={t3Traces} layout={{...pgramBase, ...makeMarginLayout(28,48,58,16),

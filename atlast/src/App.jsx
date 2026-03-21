@@ -477,7 +477,6 @@ export default function App() {
                 ['Period (hr)',   selected.final_period_hr ? parseFloat(selected.final_period_hr).toFixed(4) : '—'],
                 ['Amplitude',    selected.t2_amplitude_mag ? `${parseFloat(selected.t2_amplitude_mag).toFixed(3)} mag` : '—'],
                 ['SNR',          selected.t1_snr ? parseFloat(selected.t1_snr).toFixed(1) : '—'],
-                ['p-value',      selected.t2_p_value ? parseFloat(selected.t2_p_value).toExponential(2) : '—'],
               ].map(([l,v]) => (
                 <div className="df" key={l}><span className="df-l">{l}</span><span className="df-v">{v}</span></div>
               ))}
