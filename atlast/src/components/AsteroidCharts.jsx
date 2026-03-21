@@ -27,7 +27,7 @@ const BASE = {
   hovermode:"closest",
 };
 
-function makeMarginLayout(t=40,b=48,l=58,r=16) {
+function makeMarginLayout(t=40,b=48,l=58,r=20) {
   return {margin:{t,b,l,r}};
 }
 
@@ -168,7 +168,7 @@ export default function AsteroidCharts({ provid, period }) {
   }
   t3Traces.push(...markers.map(m=>({...m,showlegend:false})));
 
-  const pgramBase = {...BASE, ...makeMarginLayout(28,40,58,16)};
+  const pgramBase = {...BASE, ...makeMarginLayout(28,40,58,20)};
 
   /* ── Phase fold ── */
   const foldTraces = d.fold ? [
@@ -230,21 +230,24 @@ export default function AsteroidCharts({ provid, period }) {
         <div style={S.pgTitle}>Tier 1 — Fast scan (GLS · MBLS)</div>
         <Plot traces={t1Traces} layout={{...pgramBase,
           title:{text:"", font:{size:11}},
-          xaxis:{...xaxis_shared, showticklabels:false, title:{text:""}},
+          xaxis:{...xaxis_shared, title:{text:"Period (hr)"}},
           yaxis:{title:{text:"Power"},gridcolor:"#e8edf5",linecolor:"#cbd5e1"},
-        }} height={180}/>
+          legend:{...BASE.legend, x:1.02, xanchor:"left", y:1},
+        }} height={200}/>
         <div style={S.divider}/>
         <div style={S.pgTitle}>Tier 2 — High-order (MHAOV · MBLS)</div>
         <Plot traces={t2Traces} layout={{...pgramBase,
-          xaxis:{...xaxis_shared, showticklabels:false, title:{text:""}},
+          xaxis:{...xaxis_shared, title:{text:"Period (hr)"}},
           yaxis:{title:{text:"Power"},gridcolor:"#e8edf5",linecolor:"#cbd5e1"},
-        }} height={180}/>
+          legend:{...BASE.legend, x:1.02, xanchor:"left", y:1},
+        }} height={200}/>
         <div style={S.divider}/>
         <div style={S.pgTitle}>Tier 3 — {pg.ce_periods?"Conditional Entropy (CE)":"Window function"}</div>
         <Plot traces={t3Traces} layout={{...pgramBase, ...makeMarginLayout(28,48,58,16),
           xaxis:{...xaxis_shared, title:{text:"Period (hr)"}},
           yaxis:{title:{text:pg.ce_periods?"CE score":"Power"},gridcolor:"#e8edf5",linecolor:"#cbd5e1"},
-        }} height={180}/>
+          legend:{...BASE.legend, x:1.02, xanchor:"left", y:1},
+        }} height={200}/>
         <div style={{fontSize:"0.68rem",color:"#94a3b8",padding:"4px 8px",display:"flex",gap:16,flexWrap:"wrap"}}>
           <span><span style={{color:"#2563eb"}}>━</span> P={P?.toFixed(3)}h</span>
           <span><span style={{color:"#f59e0b"}}>┄</span> P/2, 2P</span>
