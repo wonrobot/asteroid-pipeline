@@ -47,8 +47,7 @@ function periodMarkers(P, periods) {
     mk(P,    `P=${P.toFixed(3)}h`,       "#2563eb","solid"),
     mk(P/2,  `P/2=${(P/2).toFixed(3)}h`, "#f59e0b","dot"),
     mk(P*2,  `2P=${(P*2).toFixed(3)}h`,  "#f59e0b","dot"),
-    mk(12,   "12h alias",                "#dc2626","dashdot"),
-    mk(24,   "24h alias",                "#dc2626","dashdot"),
+
   ].filter(Boolean);
 }
 
@@ -59,7 +58,7 @@ export default function AsteroidCharts({ provid, period }) {
 
   useEffect(() => {
     if (!provid) return;
-    setD(null); setErr(false); setTab("lc");
+    setD(null); setErr(false); setTab("fold");
     fetch(`/data/plots/data_${provid.replace(/\s+/g,"_")}.json`)
       .then(r=>{if(!r.ok)throw 0;return r.json();})
       .then(setD).catch(()=>setErr(true));
@@ -102,7 +101,7 @@ export default function AsteroidCharts({ provid, period }) {
     error_y:{type:"data",
       array:d.obs.magerr.filter((_,i)=>d.obs.band[i]===b),
       visible:true, color:BC[b]+"55", thickness:1},
-    mode:"markers", marker:{color:BC[b], size:4, opacity:0.85},
+    mode:"markers", marker:{color:BC[b], size:4, symbol:"circle", opacity:0.85},
     name:BAND_FULL[b]||b, type:"scatter",
   }));
 
@@ -133,8 +132,8 @@ export default function AsteroidCharts({ provid, period }) {
     t2Traces.push({x:pg.periods, y:pg.mhaov_power.map(v=>v*s), mode:"lines", line:{color:"#7c3aed",width:1.2}, name:"MHAOV (norm.)", type:"scatter"});
   }
   const t2mbls = pg.mbls_power; // already on same scale
-  t2Traces.push({x:pg.periods, y:t2mbls, mode:"lines", line:{color:"#2563eb",width:1}, name:"MBLS (T2)", type:"scatter"});
-  t2Traces.push(...markers);
+  t2Traces.push({x:pg.periods, y:t2mbls, mode:"lines", line:{color:"#2563eb",width:1}, name:"MBLS (T2)", type:"scatter", showlegend:true});
+  t2Traces.push(...markers.map(m=>({...m,showlegend:false})));
 
   // Panel 3 — CE / window
   const t3Traces = [];
@@ -150,7 +149,7 @@ export default function AsteroidCharts({ provid, period }) {
   if (t3Traces.length === 0) {
     t3Traces.push({x:[],y:[], type:"scatter", name:"No T3 data"});
   }
-  t3Traces.push(...markers);
+  t3Traces.push(...markers.map(m=>({...m,showlegend:false})));
 
   const pgramBase = {...BASE, ...makeMarginLayout(28,40,58,16)};
 
@@ -178,10 +177,12 @@ export default function AsteroidCharts({ provid, period }) {
   }) : null;
 
   const tabs = [
-    {id:"lc",    label:"Lightcurve"},
-    {id:"pgram", label:"Periodogram"},
     ...(d.fold?[{id:"fold",label:"Phase Fold"}]:[]),
+    {id:"pgram", label:"Periodogram"},
+    {id:"lc",    label:"Lightcurve"},
   ];
+  // Default to fold if available
+  const defaultTab = d.fold ? "fold" : "pgram";
 
   const S = {
     bar:{display:"flex",gap:4,alignItems:"center",marginBottom:8,flexWrap:"wrap"},
@@ -205,13 +206,7 @@ export default function AsteroidCharts({ provid, period }) {
 
       {tab==="lc" && <>
         <Plot traces={lcSimple} layout={lcLayout} height={290}/>
-        <div style={{fontSize:"0.7rem",color:"#94a3b8",padding:"4px 8px",display:"flex",gap:16,flexWrap:"wrap"}}>
-          {bands.map(b=><span key={b} style={{display:"flex",alignItems:"center",gap:4}}>
-            <span style={{width:10,height:10,borderRadius:"50%",background:BC[b],display:"inline-block"}}/>
-            {BAND_FULL[b]||b}
-          </span>)}
-          <span style={{marginLeft:"auto"}}>Symbol shape varies by night</span>
-        </div>
+
       </>}
 
       {tab==="pgram" && <>
@@ -236,25 +231,27 @@ export default function AsteroidCharts({ provid, period }) {
         <div style={{fontSize:"0.68rem",color:"#94a3b8",padding:"4px 8px",display:"flex",gap:16,flexWrap:"wrap"}}>
           <span><span style={{color:"#2563eb"}}>━</span> P={P?.toFixed(3)}h</span>
           <span><span style={{color:"#f59e0b"}}>┄</span> P/2, 2P</span>
-          <span><span style={{color:"#dc2626"}}>╌╌</span> 12h/24h aliases</span>
+
           <span><span style={{color:"#7c3aed"}}>┅</span> MHAOV</span>
           <span><span style={{color:"#059669"}}>╌</span> GLS</span>
           <span><span style={{color:"#0891b2"}}>━</span> CE</span>
         </div>
       </>}
 
-      {tab==="fold" && d.fold && <>
-        <Plot traces={foldTraces} layout={{...BASE,...makeMarginLayout(),
-          title:{text:`Phase fold — 2 cycles  (P = ${P?.toFixed(4)} hr)`,font:{size:12,color:"#0f172a"}},
-          xaxis:{title:{text:"Phase"},range:[0,2],dtick:0.25,gridcolor:"#e8edf5",linecolor:"#cbd5e1"},
-          yaxis:{title:{text:"Δmag (detrended)"},autorange:"reversed",gridcolor:"#e8edf5",linecolor:"#cbd5e1"},
-        }} height={270}/>
-        <Plot traces={residTraces} layout={{...BASE,...makeMarginLayout(24,44,58,16),
-          title:{text:"Residuals (O−C)",font:{size:11,color:"#0f172a"}},
-          xaxis:{title:{text:"Phase"},range:[0,2],dtick:0.25,gridcolor:"#e8edf5",linecolor:"#cbd5e1"},
-          yaxis:{title:{text:"O−C (mag)"},zeroline:true,zerolinecolor:"#475569",gridcolor:"#e8edf5"},
-        }} height={150}/>
-      </>}
+      {tab==="fold" && d.fold && (
+        <div style={{display:"flex",flexDirection:"column",gap:0}}>
+          <Plot traces={foldTraces} layout={{...BASE,...makeMarginLayout(40,8,58,16),
+            title:{text:`Phase fold — 2 cycles  (P = ${P?.toFixed(4)} hr)`,font:{size:12,color:"#0f172a"}},
+            xaxis:{title:{text:""},range:[0,2],dtick:0.25,gridcolor:"#e8edf5",linecolor:"#cbd5e1",showticklabels:false},
+            yaxis:{title:{text:"Δmag (detrended)"},autorange:"reversed",gridcolor:"#e8edf5",linecolor:"#cbd5e1"},
+          }} height={260}/>
+          <Plot traces={residTraces} layout={{...BASE,...makeMarginLayout(8,48,58,16),
+            title:{text:"",font:{size:11}},
+            xaxis:{title:{text:"Phase"},range:[0,2],dtick:0.25,gridcolor:"#e8edf5",linecolor:"#cbd5e1"},
+            yaxis:{title:{text:"O−C (mag)"},zeroline:true,zerolinecolor:"#475569",gridcolor:"#e8edf5"},
+          }} height={150}/>
+        </div>
+      )}
     </div>
   );
 }

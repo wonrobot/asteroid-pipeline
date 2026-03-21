@@ -532,10 +532,9 @@ export default function App() {
               </div>
             )}
 
-            {/* ── Science note ── */}
-            <div className="detail-note">{scienceNote(selected)}</div>
-            {selected.reliability_notes && selected.reliability_notes !== 'nan' && (
-              <div style={{fontSize:'0.75rem', color:T.textSec, marginTop:6, padding:'6px 10px',
+            {/* reliability_notes — shown only if present and not generic */}
+            {selected.reliability_notes && selected.reliability_notes !== 'nan' && !selected.reliability_notes.includes('High confidence') && (
+              <div style={{fontSize:'0.72rem', color:T.textSec, padding:'5px 10px',
                 background:T.bg, border:`1px solid ${T.border}`, borderRadius:4, lineHeight:1.5}}>
                 📋 {selected.reliability_notes}
               </div>
