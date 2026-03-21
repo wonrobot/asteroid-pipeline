@@ -50,6 +50,7 @@ CATALOG_COLUMNS = [
     "final_period_hr", "final_period_unc_hr", "reliability",
     # Reliability assessment
     "r_code", "r_flag", "alias_risk", "alias_note",
+    "window_alias_risk", "window_alias_note",
     "lcdb_agreement", "lcdb_delta_pct", "reliability_notes",
     "period_exceeds_grid", "n_cycles",
     # Data characterisation
@@ -197,6 +198,8 @@ def result_to_row(
         row["period_unc_hr"]     = rel.period_unc_hr
         row["alias_risk"]        = rel.alias_risk
         row["alias_note"]        = rel.alias_note
+        row["window_alias_risk"] = rel.window_alias_risk
+        row["window_alias_note"] = rel.window_alias_note
         row["lcdb_agreement"]    = rel.lcdb_agreement
         row["lcdb_delta_pct"]    = rel.lcdb_delta_pct
         row["reliability_notes"] = rel.notes
@@ -207,6 +210,8 @@ def result_to_row(
         row["period_unc_hr"]     = np.nan
         row["alias_risk"]        = None
         row["alias_note"]        = None
+        row["window_alias_risk"] = None
+        row["window_alias_note"] = None
         row["lcdb_agreement"]    = None
         row["lcdb_delta_pct"]    = None
         row["reliability_notes"] = None

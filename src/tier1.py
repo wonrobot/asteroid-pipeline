@@ -13,6 +13,15 @@ GLS  → data.y_dt        (merged, band-offset + detrended)
 MBLS → data.y_multiband (geometry-corrected only, raw band labels)
        MBLS fits per-band means internally — feeding it pre-offset
        data discards the inter-band colour info it exploits.
+
+Window function
+---------------
+The spectral window function is computed once here using the actual
+observation timestamps. It reveals which periods are aliases of the
+sampling cadence (as opposed to the fixed daily/annual alias list).
+The window_power array and per-period contamination scores are stored
+in Tier1Result so Tier 2 and reliability.py can reuse them without
+recomputing.
 """
 
 import logging
@@ -24,6 +33,12 @@ from gatspy.periodic import LombScargleMultiband
 
 from config import PipelineConfig, DEFAULT_CONFIG
 from preprocessing import PreparedData
+from window import (
+    compute_window_function,
+    contamination_score,
+    window_informed_peaks,
+    CONTAMINATION_THRESHOLD,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -37,29 +52,39 @@ class Tier1Result:
 
     Attributes
     ----------
-    provid          : asteroid designation
-    passes          : True if this object should proceed to Tier 2
-    best_period_gls : best period from GLS (hours)
-    best_period_mbls: best period from MBLS Nterms=1 (hours)
-    gls_power_max   : peak GLS power (0–1)
-    snr             : amplitude SNR from preprocessing
-    n_obs           : number of observations
-    reject_reason   : if passes=False, explains why (else None)
-    test_periods    : period grid used
-    gls_power       : full GLS power array (for plotting)
-    mbls_power      : full MBLS power array (for plotting)
+    provid              : asteroid designation
+    passes              : True if this object should proceed to Tier 2
+    best_period_gls     : best period from GLS after window penalisation (hours)
+    best_period_mbls    : best period from MBLS Nterms=1 (hours)
+    gls_power_max       : peak GLS power (0–1), raw (pre-penalisation)
+    snr                 : amplitude SNR from preprocessing
+    n_obs               : number of observations
+    reject_reason       : if passes=False, explains why (else None)
+    test_periods        : period grid used
+    gls_power           : full GLS power array (for plotting)
+    mbls_power          : full MBLS power array (for plotting)
+    window_power        : spectral window function on test_periods grid.
+                          Peaks here are cadence aliases — used downstream
+                          by Tier 2 and reliability.py to score candidates.
+    gls_contamination   : alias contamination score for best GLS period [0–1].
+                          0 = clean, 1 = sits exactly on a window peak.
+    mbls_contamination  : alias contamination score for best MBLS period [0–1].
     """
-    provid:           str
-    passes:           bool
-    best_period_gls:  float
-    best_period_mbls: float
-    gls_power_max:    float
-    snr:              float
-    n_obs:            int
-    reject_reason:    Optional[str]
-    test_periods:     np.ndarray
-    gls_power:        np.ndarray
-    mbls_power:       np.ndarray
+    provid:              str
+    passes:              bool
+    best_period_gls:     float
+    best_period_mbls:    float
+    gls_power_max:       float
+    snr:                 float
+    n_obs:               int
+    reject_reason:       Optional[str]
+    test_periods:        np.ndarray
+    gls_power:           np.ndarray
+    mbls_power:          np.ndarray
+    # ── New: window function fields ───────────────────────────────────────────
+    window_power:        np.ndarray   # window function on same grid as test_periods
+    gls_contamination:   float        # cadence-alias score for best GLS period
+    mbls_contamination:  float        # cadence-alias score for best MBLS period
 
 
 # ── Main Tier 1 entry point ───────────────────────────────────────────────────
@@ -109,7 +134,7 @@ def run_tier1(
     #   (b) best coarse period is near the 0.5hr boundary
     #   AND the data actually supports sub-0.5hr detection
     near_boundary  = best_coarse < FAST_THRESH * 1.5
-    weak_power     = max_pow_coarse < 0.15  # low GLS power = may be missing fast signal
+    weak_power     = max_pow_coarse < 0.15
     can_search_fast = data.period_min_hr < FAST_THRESH
     if (near_boundary or weak_power) and can_search_fast:
         n_fast       = min(20_000, max(cfg_p.n_grid_coarse,
@@ -119,13 +144,46 @@ def run_tier1(
     # else: keep coarse test_periods — normal rotator, no expansion needed
 
     # ── GLS — uses merged, band-offset-corrected + detrended series ───────────
-    # Run GLS on final test_periods (pass 1 coarse or pass 2 expanded)
     gls_pow  = gls_periodogram(data.t_hrs, data.y_dt, data.dy, test_periods)
-    best_gls = test_periods[np.argmax(gls_pow)]
     gls_max  = float(gls_pow.max())
 
+    # ── Window function ───────────────────────────────────────────────────────
+    # Computed once on the final period grid. Peaks in the window function
+    # are cadence aliases — periods the sampling pattern can introduce as
+    # false peaks regardless of the true signal.
+    # This replaces the fixed alias list in reliability.py for the initial
+    # period selection step. Both checks run: fixed list catches the well-known
+    # daily/annual aliases; window function catches dataset-specific aliases
+    # (e.g. ~3-day gaps from LSST scheduling, moon avoidance windows, etc.).
+    window_pow = compute_window_function(data.t_hrs, test_periods)
+
+    # ── Window-penalised best GLS period ─────────────────────────────────────
+    # Instead of raw argmax, use window_informed_peaks which applies a
+    # penalty to candidates sitting on window peaks.
+    # If the top penalised peak differs from raw argmax, the raw best period
+    # was a cadence alias and we've caught it here at negligible extra cost.
+    gls_peaks, gls_raw_powers, _ = window_informed_peaks(
+        test_periods, gls_pow, window_pow,
+        n_peaks=3,
+        min_period_hr=float(test_periods[0]),
+        max_period_hr=float(test_periods[-1]),
+    )
+    best_gls     = float(gls_peaks[0]) if len(gls_peaks) > 0 else test_periods[np.argmax(gls_pow)]
+    gls_raw_best = float(test_periods[np.argmax(gls_pow)])
+    gls_cont     = contamination_score(best_gls, test_periods, window_pow)
+
+    if best_gls != gls_raw_best:
+        logger.debug(
+            f"{data.provid}: GLS raw best={gls_raw_best:.3f}hr is window-contaminated "
+            f"→ window-penalised best={best_gls:.3f}hr"
+        )
+    elif gls_cont > CONTAMINATION_THRESHOLD:
+        logger.debug(
+            f"{data.provid}: GLS best={best_gls:.3f}hr is window-contaminated "
+            f"(score={gls_cont:.2f}) — cadence alias risk"
+        )
+
     # ── MBLS Nterms=1 — uses raw multiband series, NO pre-applied offsets ─────
-    # MBLS fits per-band means internally as part of the model.
     try:
         mbls_pow  = mbls_periodogram(
             data.t_hrs, data.y_multiband, data.dy, data.bands,
@@ -137,16 +195,20 @@ def run_tier1(
         mbls_pow  = gls_pow.copy()
         best_mbls = best_gls
 
-    # ── No power gate here ────────────────────────────────────────────────────
-    # T1 gates only on data quality (n_obs, SNR). Signal significance is
-    # tested in T2 via MHAOV F-statistic with real p-values from F-distribution.
-    # Raw power thresholds fail for fast rotators (non-sinusoidal → low GLS)
-    # and multi-band data. MK41 (P=0.063hr) has MHAOV p=7e-09 but GLS=0.046.
-    mbls_max = float(mbls_pow.max())
+    # Score MBLS best period for window contamination
+    mbls_cont = contamination_score(float(best_mbls), test_periods, window_pow)
 
+    if mbls_cont > CONTAMINATION_THRESHOLD:
+        logger.debug(
+            f"{data.provid}: MBLS best={best_mbls:.3f}hr is window-contaminated "
+            f"(score={mbls_cont:.2f})"
+        )
+
+    # ── Summary log ──────────────────────────────────────────────────────────
     logger.debug(
         f"{data.provid} Tier1: GLS best={best_gls:.3f}hr "
-        f"power={gls_max:.3f}, MBLS best={best_mbls:.3f}hr  → PASS"
+        f"(cont={gls_cont:.2f}) power={gls_max:.3f}, "
+        f"MBLS best={best_mbls:.3f}hr (cont={mbls_cont:.2f}) → PASS"
     )
 
     return Tier1Result(
@@ -155,6 +217,9 @@ def run_tier1(
         gls_power_max=gls_max, snr=data.snr, n_obs=data.n_obs,
         reject_reason=None,
         test_periods=test_periods, gls_power=gls_pow, mbls_power=mbls_pow,
+        window_power=window_pow,
+        gls_contamination=gls_cont,
+        mbls_contamination=mbls_cont,
     )
 
 
@@ -245,4 +310,7 @@ def _reject(
         gls_power_max=0.0, snr=data.snr, n_obs=data.n_obs,
         reject_reason=reason,
         test_periods=empty, gls_power=empty, mbls_power=empty,
+        window_power=empty,
+        gls_contamination=np.nan,
+        mbls_contamination=np.nan,
     )

@@ -11,37 +11,44 @@ R codes
 -------
 R=3  : High confidence. All methods agree, signal significant,
        data regime supports full pipeline. Safe to publish.
-       Equivalent to LCDB U=3.
 
 R=2  : Moderate confidence. Methods agree but data is sparse or
        p-value is marginal. Publish with uncertainty caveat.
-       Equivalent to LCDB U=2.
 
 R=1  : Low confidence. Methods partially agree or Tier 3 tentative.
        Include in catalog but flag as uncertain.
-       Equivalent to LCDB U=1.
 
-R=0  : Insufficient confidence. Methods disagree and Tier 3 cannot
-       resolve. Do not publish period. Flag for follow-up.
+R=0  : Insufficient confidence. Do not publish period.
 
 R=-1 : Alias suspect. Result is close to a known alias frequency
-       (0.5 day, 1 day, 0.5 year, 1 year) regardless of agreement.
+       OR sits on a cadence-specific window peak.
        Requires independent confirmation before publishing.
+
+Alias detection (two-layer)
+---------------------------
+Layer 1 — fixed list (daily/annual): flag_alias_risk()
+  Checks the adopted period against known ground-based aliases:
+  0.5 day, 1 day, 2 day, 0.5 year, 1 year.
+
+Layer 2 — cadence-specific window contamination: flag_window_alias()
+  Uses the spectral window function stored in t1result.window_power
+  to compute a contamination score for the adopted period against the
+  ACTUAL observation cadence of this specific asteroid. Catches
+  dataset-specific aliases (e.g. 3-day LSST scheduling gaps, moon
+  avoidance windows) that the fixed list misses entirely.
+
+Both layers run independently. Either can trigger R=-1.
 
 LCDB comparison
 ---------------
 When a LCDB record exists (u_code >= 2), we additionally compute
-lcdb_agreement and flag discrepancies as scientifically interesting:
-
-  exact        : pipeline agrees within 5% — confirms LCDB
-  half_period  : pipeline found P/2 — double-hump alias
-  double_period: pipeline found 2P  — possible LCDB error
-  disagree     : significant disagreement — investigate
+lcdb_agreement and flag discrepancies.
 
 Functions
 ---------
 compute_reliability(char, t1, t2, t3, lcdb_record) — main entry point
-flag_alias_risk(period_hr, tolerance)               — alias frequency check
+flag_alias_risk(period_hr, tolerance)               — fixed alias check
+flag_window_alias(period_hr, t1result)              — cadence alias check
 """
 
 import logging
@@ -51,7 +58,7 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# Known problematic alias periods in hours
+# Known problematic alias periods in hours — fixed list
 ALIAS_PERIODS_HR = [
     12.0,          # 0.5 day
     24.0,          # 1.0 day
@@ -59,7 +66,10 @@ ALIAS_PERIODS_HR = [
     8760.0 / 2,    # 0.5 year
     8760.0,        # 1.0 year
 ]
-ALIAS_TOLERANCE = 0.05   # 5% — period within this of alias → flag
+ALIAS_TOLERANCE = 0.05   # 5%
+
+# Contamination score above which we treat a period as a cadence alias
+WINDOW_ALIAS_THRESHOLD = 0.5
 
 
 # ── Output dataclass ──────────────────────────────────────────────────────────
@@ -71,64 +81,56 @@ class ReliabilityAssessment:
 
     Attributes
     ----------
-    provid           : asteroid designation
-    r_code           : reliability code (-1, 0, 1, 2, 3)
-    r_flag           : string version e.g. "3", "2", "1", "0", "-1(alias)"
-    period_hr        : adopted period in hours (NaN if r_code <= 0)
-    period_unc_hr    : period uncertainty in hours (NaN if not available)
-    source           : which tier/method provided the period
-    agreement        : True if all Tier 2 methods agreed
-    period_spread_pct: max fractional spread across Tier 2 methods
-    p_value          : MHAOV p-value at best period
-    alias_risk       : True if period is close to a known alias
-    alias_note       : which alias is nearby (empty if no risk)
-    lcdb_agreement   : "exact"/"half_period"/"double_period"/"disagree"/"no_prior"
-    lcdb_delta_pct   : fractional difference from LCDB period
-    notes            : human-readable explanation of the score
+    provid              : asteroid designation
+    r_code              : reliability code (-1, 0, 1, 2, 3)
+    r_flag              : string version e.g. "3", "2", "1", "0", "-1(alias)"
+    period_hr           : adopted period in hours (NaN if r_code <= 0)
+    period_unc_hr       : period uncertainty in hours
+    source              : which tier/method provided the period
+    agreement           : True if all Tier 2 methods agreed
+    period_spread_pct   : max fractional spread across Tier 2 methods
+    p_value             : MHAOV p-value at best period
+    alias_risk          : True if fixed-list alias detected
+    alias_note          : which fixed alias is nearby
+    window_alias_risk   : True if cadence-specific alias detected
+    window_alias_note   : contamination score and description
+    lcdb_agreement      : "exact"/"half_period"/"double_period"/"disagree"/"no_prior"
+    lcdb_delta_pct      : fractional difference from LCDB period
+    notes               : human-readable explanation of the score
     """
-    provid:            str
-    r_code:            int
-    r_flag:            str
-    period_hr:         float
-    period_unc_hr:     float
-    source:            str
-    agreement:         bool
-    period_spread_pct: float
-    p_value:           float
-    alias_risk:        bool
-    alias_note:        str
-    lcdb_agreement:    str
-    lcdb_delta_pct:    float
-    notes:             str
+    provid:             str
+    r_code:             int
+    r_flag:             str
+    period_hr:          float
+    period_unc_hr:      float
+    source:             str
+    agreement:          bool
+    period_spread_pct:  float
+    p_value:            float
+    alias_risk:         bool
+    alias_note:         str
+    window_alias_risk:  bool     # NEW: cadence-specific alias
+    window_alias_note:  str      # NEW: contamination score + description
+    lcdb_agreement:     str
+    lcdb_delta_pct:     float
+    notes:              str
 
 
 # ── Main function ─────────────────────────────────────────────────────────────
 
 def compute_reliability(
-    char,          # DataCharacterisation
-    t1result,      # Tier1Result
-    t2result=None, # Tier2Result | None
-    t3result=None, # Tier3Result | None
-    lcdb_record=None,  # LCDBRecord | None
+    char,
+    t1result,
+    t2result=None,
+    t3result=None,
+    lcdb_record=None,
 ) -> ReliabilityAssessment:
     """
     Compute reliability code for one asteroid period result.
-
-    Parameters
-    ----------
-    char        : DataCharacterisation from characterise.py
-    t1result    : Tier1Result
-    t2result    : Tier2Result (None if Tier 1 failed)
-    t3result    : Tier3Result (None if Tier 2 published or pipeline stopped)
-    lcdb_record : LCDBRecord from sources.lcdb (optional)
-
-    Returns
-    -------
-    ReliabilityAssessment
     """
     provid = char.provid
 
-    # ── Case 1: Tier 1 failed — no period ─────────────────────────────────────
+    # ── Case 1: Tier 1 failed ─────────────────────────────────────────────────
     if not t1result.passes:
         return ReliabilityAssessment(
             provid=provid, r_code=0, r_flag="0",
@@ -136,11 +138,12 @@ def compute_reliability(
             source="none", agreement=False,
             period_spread_pct=np.nan, p_value=np.nan,
             alias_risk=False, alias_note="",
+            window_alias_risk=False, window_alias_note="",
             lcdb_agreement="no_prior", lcdb_delta_pct=np.nan,
             notes=f"Tier 1 failed: {t1result.reject_reason}",
         )
 
-    # ── Case 2: Tier 2 not run ─────────────────────────────────────────────────
+    # ── Case 2: Tier 2 not run ────────────────────────────────────────────────
     if t2result is None:
         return ReliabilityAssessment(
             provid=provid, r_code=0, r_flag="0",
@@ -148,12 +151,13 @@ def compute_reliability(
             source="none", agreement=False,
             period_spread_pct=np.nan, p_value=np.nan,
             alias_risk=False, alias_note="",
+            window_alias_risk=False, window_alias_note="",
             lcdb_agreement="no_prior", lcdb_delta_pct=np.nan,
             notes="Tier 2 not run",
         )
 
     # ── Extract Tier 2 diagnostics ────────────────────────────────────────────
-    agreement        = t2result.agreement   # True, False, or "two_of_three"
+    agreement        = t2result.agreement
     full_agreement   = (agreement is True)
     two_of_three     = (agreement == "two_of_three")
     period_spread    = t2result.period_spread_pct
@@ -161,7 +165,7 @@ def compute_reliability(
     p_value          = t2result.p_value
     consensus_period = t2result.consensus_period
 
-    # ── Extract Tier 3 diagnostics if available ───────────────────────────────
+    # ── Extract Tier 3 diagnostics ────────────────────────────────────────────
     t3_period     = np.nan
     t3_ci_width   = np.nan
     t3_peak_ratio = np.nan
@@ -176,7 +180,7 @@ def compute_reliability(
     # ── Determine adopted period and source ───────────────────────────────────
     if t2result.passes:
         adopted_period = consensus_period
-        period_unc     = np.nan   # CI not computed at Tier 2
+        period_unc     = np.nan
         source         = "tier2_consensus"
     elif t3result is not None and t3_reliable:
         adopted_period = t3_period
@@ -191,8 +195,19 @@ def compute_reliability(
         period_unc     = np.nan
         source         = "none"
 
-    # ── Alias risk check ──────────────────────────────────────────────────────
+    # ── Layer 1: Fixed alias list ─────────────────────────────────────────────
     alias_risk, alias_note = flag_alias_risk(adopted_period)
+
+    # ── Layer 2: Cadence-specific window alias ────────────────────────────────
+    # Uses the actual window function computed from this asteroid's observation
+    # timestamps — catches scheduling gaps and moon avoidance windows that the
+    # fixed daily/annual list misses entirely.
+    window_alias_risk, window_alias_note = flag_window_alias(
+        adopted_period, t1result
+    )
+
+    # Combined alias flag — either layer triggers R=-1
+    any_alias = alias_risk or window_alias_risk
 
     # ── LCDB comparison ───────────────────────────────────────────────────────
     lcdb_agreement  = "no_prior"
@@ -209,31 +224,36 @@ def compute_reliability(
 
     # ── Compute R code ────────────────────────────────────────────────────────
     r_code, notes = _compute_r_code(
-        regime           = char.regime,
+        regime              = char.regime,
         reliability_ceiling = char.reliability_ceiling,
-        agreement        = agreement,
-        period_spread    = period_spread,
-        p_value          = p_value,
-        t2_passes        = t2result.passes,
-        t3_reliable      = t3_reliable,
-        t3_ci_width      = t3_ci_width,
-        t3_peak_ratio    = t3_peak_ratio,
-        alias_risk       = alias_risk,
-        alias_note       = alias_note,
-        adopted_period   = adopted_period,
-        n_obs            = char.n_obs,
-        n_nights         = char.n_nights,
-        mbls_raw         = mbls_raw,
+        agreement           = agreement,
+        period_spread       = period_spread,
+        p_value             = p_value,
+        t2_passes           = t2result.passes,
+        t3_reliable         = t3_reliable,
+        t3_ci_width         = t3_ci_width,
+        t3_peak_ratio       = t3_peak_ratio,
+        alias_risk          = any_alias,
+        alias_note          = alias_note or window_alias_note,
+        adopted_period      = adopted_period,
+        n_obs               = char.n_obs,
+        n_nights            = char.n_nights,
+        mbls_raw            = mbls_raw,
+        # Pass through Tier 2 contamination scores for additional context
+        consensus_contamination = getattr(t2result, 'consensus_contamination', np.nan),
     )
 
     # ── Build r_flag string ───────────────────────────────────────────────────
     r_flag = str(r_code)
-    if alias_risk and r_code > 0:
+    if any_alias and r_code > 0:
         r_flag = f"{r_code}-alias"
+    if window_alias_risk and not alias_risk and r_code > 0:
+        r_flag = f"{r_code}-cadence_alias"
 
     logger.debug(
         f"{provid}: R={r_code} ({r_flag}) P={adopted_period:.3f}hr "
-        f"agree={agreement} p={p_value:.2e} alias={alias_risk}"
+        f"agree={agreement} p={p_value:.2e} "
+        f"fixed_alias={alias_risk} window_alias={window_alias_risk}"
     )
 
     return ReliabilityAssessment(
@@ -248,6 +268,8 @@ def compute_reliability(
         p_value           = p_value,
         alias_risk        = alias_risk,
         alias_note        = alias_note,
+        window_alias_risk = window_alias_risk,
+        window_alias_note = window_alias_note,
         lcdb_agreement    = lcdb_agreement,
         lcdb_delta_pct    = lcdb_delta_pct,
         notes             = notes,
@@ -261,38 +283,23 @@ def _compute_r_code(
     p_value, t2_passes, t3_reliable, t3_ci_width,
     t3_peak_ratio, alias_risk, alias_note, adopted_period,
     n_obs, n_nights, mbls_raw=None,
+    consensus_contamination=np.nan,
 ) -> tuple:
     """
     Core R code decision logic. Returns (r_code, notes_string).
 
-    Decision tree:
-    ─────────────
-    No period adopted → R=0
-    Alias risk        → R=-1
-
-    T2 passes:
-      dense + agree + p<0.001   → R=3
-      sparse + agree + p<0.001  → R=2
-      any + agree + p<0.01      → R=2
-      any + agree + p>=0.01     → R=1
-
-    T3 tentative:
-      ci_width < 0.5 AND peak_ratio > 3   → R=2
-      ci_width < 0.5 OR  peak_ratio > 3   → R=1
-      neither                              → R=0
-
-    Ceiling cap: never exceed reliability_ceiling
-      high   → max R=3
-      medium → max R=2
-      low    → max R=1
+    Contamination modifier
+    ----------------------
+    When the consensus period has high window contamination
+    (consensus_contamination > WINDOW_ALIAS_THRESHOLD) but is not
+    already flagged as an alias, we cap the R code at 2 and add a
+    note. This is a softer penalty than alias_risk (which forces R=-1)
+    because the period may still be real — the contamination just means
+    we can't rule out the cadence alias explanation.
     """
     ceiling_map = {"high": 3, "medium": 2, "low": 1, "unknown": 1}
     ceiling     = ceiling_map.get(reliability_ceiling, 1)
 
-    # Superfast rotator cap — if the RAW (pre-doubling) MBLS period was below
-    # the 2.2hr spin barrier, cap at R=2 regardless of the adopted period.
-    # This catches cases where 2-minima doubling pushed the period above 2.2hr
-    # but the underlying detection is still a fast rotator.
     SPIN_BARRIER_HR = 2.2
     superfast_raw = (
         mbls_raw is not None
@@ -308,13 +315,22 @@ def _compute_r_code(
     if superfast_raw or superfast_adopted:
         ceiling = min(ceiling, 2)
 
+    # Contamination cap: high window contamination on the consensus period
+    # lowers the ceiling to R=2 even if all other criteria would give R=3.
+    # Rationale: if the adopted period sits on a cadence window peak, we
+    # can't distinguish "real signal at an unfortunate period" from
+    # "cadence alias mistaken for a signal".
+    if (not np.isnan(consensus_contamination)
+            and consensus_contamination > WINDOW_ALIAS_THRESHOLD
+            and not alias_risk):
+        ceiling = min(ceiling, 2)
+
     # No period
     if np.isnan(adopted_period):
         if not t2_passes and not t3_reliable:
             return 0, _note(
                 "No reliable period. Methods disagree at Tier 2 and "
-                "Tier 3 could not resolve ambiguity. "
-                "More observations needed."
+                "Tier 3 could not resolve ambiguity."
             )
         return 0, _note("No period adopted.")
 
@@ -330,11 +346,9 @@ def _compute_r_code(
         two_of_three_flag = (agreement == "two_of_three")
 
         if two_of_three_flag:
-            # MHAOV+MBLS agree (Greenstreet-equivalent) but CE disagrees
-            # Cap at R=1 regardless of regime — CE failure signals residual alias risk
             r = 1
             note = _note(
-                f"MHAOV+MBLS agree (Greenstreet-equivalent, spread={period_spread*100:.1f}%), "
+                f"MHAOV+MBLS agree (spread={period_spread*100:.1f}%), "
                 f"CE disagrees. p={p_value:.2e}. Publish as tentative (R=1)."
             )
             return min(r, ceiling), note
@@ -355,10 +369,9 @@ def _compute_r_code(
             else:
                 r = 1
                 note = _note(
-                    f"Methods agree but p={p_value:.2e} not significant. "
-                    f"Treat as tentative."
+                    f"Methods agree but p={p_value:.2e} not significant. Tentative."
                 )
-        else:  # sparse
+        else:
             if p_value < 0.001:
                 r = 2
                 note = _note(
@@ -368,9 +381,15 @@ def _compute_r_code(
             else:
                 r = 1
                 note = _note(
-                    f"Methods agree but sparse data and p={p_value:.2e}. "
-                    f"Low confidence."
+                    f"Methods agree but sparse data and p={p_value:.2e}. Low confidence."
                 )
+
+        # Append contamination note if ceiling was capped
+        if (not np.isnan(consensus_contamination)
+                and consensus_contamination > WINDOW_ALIAS_THRESHOLD):
+            note += (f" [R capped at 2: consensus period has window "
+                     f"contamination={consensus_contamination:.2f}]")
+
         return min(r, ceiling), note
 
     # T3 result
@@ -382,15 +401,13 @@ def _compute_r_code(
             r    = 2
             note = _note(
                 f"Tier 3 tentative: CI={t3_ci_width:.3f}hr, "
-                f"CLEAN ratio={t3_peak_ratio:.1f}. "
-                f"Both criteria met. Moderate confidence."
+                f"CLEAN ratio={t3_peak_ratio:.1f}. Both criteria met."
             )
         else:
             r    = 1
             note = _note(
                 f"Tier 3 tentative: CI={t3_ci_width:.3f}hr, "
-                f"CLEAN ratio={t3_peak_ratio:.1f}. "
-                f"Only one criterion met. Low confidence."
+                f"CLEAN ratio={t3_peak_ratio:.1f}. Only one criterion met."
             )
         return min(r, ceiling), note
 
@@ -404,15 +421,14 @@ def _note(text: str) -> str:
     return text.strip()
 
 
-# ── Alias risk ────────────────────────────────────────────────────────────────
+# ── Layer 1: Fixed alias check ────────────────────────────────────────────────
 
 def flag_alias_risk(
     period_hr: float,
     tolerance: float = ALIAS_TOLERANCE,
 ) -> tuple:
     """
-    Check if a period is suspiciously close to a known alias frequency.
-
+    Check if a period is close to a known fixed alias frequency.
     Returns (is_risky, note_string).
     """
     if np.isnan(period_hr) or period_hr <= 0:
@@ -430,5 +446,56 @@ def flag_alias_risk(
         delta = abs(period_hr - alias_p) / alias_p
         if delta <= tolerance:
             return True, f"{name} ({alias_p:.1f}hr, Δ={delta*100:.1f}%)"
+
+    return False, ""
+
+
+# ── Layer 2: Cadence-specific window alias check ──────────────────────────────
+
+def flag_window_alias(
+    period_hr: float,
+    t1result,
+    threshold: float = WINDOW_ALIAS_THRESHOLD,
+) -> tuple:
+    """
+    Check if a period sits on a peak in the spectral window function —
+    meaning the sampling cadence of THIS specific dataset can produce
+    that period as an alias, regardless of whether any real signal exists.
+
+    This is more informative than the fixed list because:
+    - Every asteroid has a unique observing history (different nights, gaps)
+    - LSST scheduling introduces dataset-specific gaps (moon, weather,
+      field rotation) that appear at different periods for each object
+    - The window function directly encodes these gaps as alias peaks
+
+    Parameters
+    ----------
+    period_hr : adopted period to check
+    t1result  : Tier1Result containing window_power and test_periods
+    threshold : contamination score above which we flag as alias risk
+
+    Returns
+    -------
+    (is_risky, note_string)
+    """
+    if np.isnan(period_hr) or period_hr <= 0:
+        return False, ""
+
+    # Guard: window_power may be empty for rejected objects
+    if (not hasattr(t1result, 'window_power')
+            or len(t1result.window_power) == 0
+            or len(t1result.test_periods) == 0):
+        return False, ""
+
+    from window import contamination_score
+    score = contamination_score(period_hr, t1result.test_periods, t1result.window_power)
+
+    if score > threshold:
+        return True, (
+            f"cadence alias: period {period_hr:.3f}hr sits on window peak "
+            f"(contamination={score:.2f} > {threshold}). "
+            f"This alias arises from the specific observation gaps for this "
+            f"asteroid — not in fixed daily/annual list."
+        )
 
     return False, ""
