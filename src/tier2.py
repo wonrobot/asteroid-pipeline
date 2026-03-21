@@ -279,14 +279,39 @@ def run_tier2(
             reject_reason=f"p-value={p_value:.2e} not significant and methods disagree"
         )
 
+    # Fix consensus for harmonic cases before two_of_three check
+    # If MHAOV+CE agree but MBLS=2×(MHAOV), consensus should be MBLS
+    # e.g. MJ30: MHAOV=2.507, CE=2.507, MBLS=5.601 → median=2.507 (wrong)
+    # The correct period is MBLS=5.601 (Cases A-C handle this)
+    d_mbls_2mhaov_cons = abs(best_mbls - 2*best_mhaov) / (2*best_mhaov + 1e-12)
+    if d_mbls_2mhaov_cons <= cfg_t.agreement_tol * 2:
+        consensus = float(best_mbls)  # MBLS found doubled (correct) period
+
     if full_agreement and p_value < cfg_t.mhaov_pval_thresh:
         return _make_result(passes=True, to_tier3=False, agreement_val=True)
 
     if two_of_three and p_value < cfg_t.mhaov_pval_thresh:
-        logger.debug(f"{data.provid} Tier2: 2-of-3 agreement (MHAOV+MBLS) — tentative publish")
+        # Consensus period: use the period agreed upon by the majority.
+        # Case D (MHAOV+CE agree, MBLS=P/2): use MHAOV period
+        # Standard two_of_three (MHAOV+MBLS agree): use MBLS period
+        d_ce_mhaov    = abs(best_ce - best_mhaov) / (best_mhaov + 1e-12) if best_ce else 1.0
+        d_mhaov_mbls  = abs(best_mhaov - best_mbls) / (best_mbls + 1e-12)
+        d_mbls_2mhaov = abs(best_mbls - 2*best_mhaov) / (2*best_mhaov + 1e-12)
+        if d_mbls_2mhaov <= cfg_t.agreement_tol * 2:
+            # MBLS=2×MHAOV: MHAOV+CE on P/2, MBLS on correct P → use MBLS
+            consensus_two = best_mbls
+            logger.debug(f"{data.provid} Tier2: 2-of-3 MBLS=2×MHAOV → consensus={consensus_two:.3f}hr")
+        elif d_ce_mhaov <= cfg_t.agreement_tol * 2 and d_mhaov_mbls > cfg_t.agreement_tol:
+            # Case D: MHAOV+CE agree, MBLS unrelated → use MHAOV
+            consensus_two = best_mhaov
+            logger.debug(f"{data.provid} Tier2: 2-of-3 MHAOV+CE → consensus={consensus_two:.3f}hr")
+        else:
+            # Standard: MHAOV+MBLS agree → use MBLS
+            consensus_two = best_mbls
+            logger.debug(f"{data.provid} Tier2: 2-of-3 MHAOV+MBLS → consensus={consensus_two:.3f}hr")
         return _make_result(
             passes=True, to_tier3=False, agreement_val="two_of_three",
-            consensus_p=best_mbls
+            consensus_p=consensus_two
         )
 
     # Full disagreement — escalate to Tier 3
@@ -558,11 +583,30 @@ def check_agreement(
     if d_ce_half <= tol and d_mbls_mhaov <= tol_harmonic:
         return True, float(max(d_ce_half, d_mbls_mhaov))
 
+    # Harmonic Cases D, E: MHAOV (p1) found doubled period, MBLS (p2) on P/2
+    # Reverse of Cases A-C: MHAOV=2*MBLS
+    d_mhaov_double = abs(p1 - 2*p2) / (2*p2 + 1e-12)
+    d_ce_double    = abs(p3 - 2*p2) / (2*p2 + 1e-12)
+    d_ce_mhaov     = abs(p3 - p1)   / (p1   + 1e-12)
+
+    # Case D: MHAOV = 2*MBLS AND CE ≈ MHAOV (CE confirms doubled period)
+    if d_mhaov_double <= tol and d_ce_mhaov <= tol_harmonic:
+        return True, float(max(d_mhaov_double, d_ce_mhaov))
+
+    # Case E: MHAOV = 2*MBLS AND CE ≈ MBLS (CE on half period, 2 of 3 on P/2)
+    if d_mhaov_double <= tol and abs(p3-p2)/(p2+1e-12) <= tol_harmonic:
+        return "two_of_three", float(d_mhaov_double)
+
     # Two-of-three check: MHAOV (p1) and MBLS (p2) agree, CE (p3) does not
     # Equivalent to Greenstreet LSM+Fourier agreement criterion
     d_mhaov_mbls = abs(p1 - p2) / (p2 + 1e-12)
     if d_mhaov_mbls <= tol:
         return "two_of_three", float(d_mhaov_mbls)
+
+    # Two-of-three: MHAOV+CE agree, MBLS disagrees
+    # CE always uses same data as MHAOV so this is an independent confirmation
+    if d_ce_mhaov <= tol:
+        return "two_of_three", float(d_ce_mhaov)
 
     return False, spread_pct
 
