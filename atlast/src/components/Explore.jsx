@@ -78,7 +78,7 @@ function SpinHistogram({catalog}) {
 
   return (
     <Card title="Rotation Period Distribution"
-      subtitle={`${periods.length} asteroids with detected periods`}>
+      subtitle={`${periods.length} asteroids with detected periods · 0.5 hr bins`}>
       <PlotDiv height={220} traces={[{
         x:periods, type:"histogram",
         xbins:{start:0,end:25,size:0.5},
@@ -147,41 +147,38 @@ function SpinSpectrum({catalog,onSelect}) {
 
   return (
     <Card title="Spin Spectrum"
-      subtitle="Each dot = one asteroid · dot size ∝ lightcurve amplitude · click to explore">
+      subtitle="Each dot = one asteroid · size ∝ amplitude">
       <div style={{display:"flex",gap:12,flexWrap:"wrap",padding:"6px 20px 0",alignItems:"center"}}>
         {groups.map(rc=><RDot key={rc} r={rc}/>)}
-        <span style={{marginLeft:"auto",fontSize:"0.63rem",color:T.textDim}}>
-          size ∝ amplitude · hover for details
-        </span>
+
       </div>
       <div ref={ref} style={{width:"100%",height:160}}/>
     </Card>
   );
 }
 
-// ── 3. Period vs Amplitude scatter ────────────────────────
-function AmpVsPeriod({catalog,onSelect}) {
+// ── 3. Detection quality: SNR vs N_obs ──────────────────
+function SNRvsNobs({catalog,onSelect}) {
   const rows = catalog.filter(r=>
-    r.final_period_hr&&r.final_period_hr!==""&&
-    r.t2_amplitude_mag&&r.t2_amplitude_mag!==""&&
+    r.t1_n_obs&&r.t1_n_obs!==""&&
+    r.t1_snr&&r.t1_snr!==""&&
     String(r.r_code)!=="0"
   );
-  const groups=["3","2","1","-1"].filter(rc=>
-    rows.some(r=>String(r.r_code)===rc));
+  const groups=["3","2","1","-1"].filter(rc=>rows.some(r=>String(r.r_code)===rc));
   const traces=groups.map(rc=>{
     const sub=rows.filter(r=>String(r.r_code)===rc);
     return {
-      x:sub.map(r=>parseFloat(r.final_period_hr)),
-      y:sub.map(r=>parseFloat(r.t2_amplitude_mag)),
+      x:sub.map(r=>parseInt(r.t1_n_obs)),
+      y:sub.map(r=>parseFloat(r.t1_snr)),
       text:sub.map(r=>r.provid),
       customdata:sub,
       mode:"markers",
-      marker:{color:R_COLOR[rc],size:8,opacity:0.85,
+      marker:{color:R_COLOR[rc],size:7,opacity:0.85,
         line:{color:"rgba(255,255,255,0.5)",width:0.8}},
       name:R_LABEL[rc],type:"scatter",
-      hovertemplate:"<b>%{text}</b><br>P = %{x:.3f} hr<br>Amp = %{y:.3f} mag<extra></extra>",
+      hovertemplate:"<b>%{text}</b><br>%{x} obs · SNR %{y:.1f}<extra></extra>",
     };
-  }).filter(t=>t.x.length>0);
+  });
 
   const ref = useRef(null);
   useEffect(()=>{
@@ -191,11 +188,9 @@ function AmpVsPeriod({catalog,onSelect}) {
         ...BASE,
         margin:{t:16,b:44,l:58,r:16},
         xaxis:{gridcolor:"#f8fafc",linecolor:"#e2e8f0",zeroline:false,
-          title:{text:"Rotation period (hr)"},range:[0,25]},
+          title:{text:"Number of observations"}},
         yaxis:{gridcolor:"#f8fafc",linecolor:"#e2e8f0",zeroline:false,
-          title:{text:"Lightcurve amplitude (mag)"}},
-        shapes:[{...BARRIER,y0:undefined,y1:undefined,
-          line:{...BARRIER.line,opacity:0.3}}],
+          title:{text:"Detection SNR"}},
       },{displayModeBar:false,responsive:true});
       ref.current.on("plotly_click",e=>{
         const row=e.points[0]?.customdata;
@@ -205,8 +200,8 @@ function AmpVsPeriod({catalog,onSelect}) {
   },[catalog]);
 
   return (
-    <Card title="Rotation Period vs Shape Elongation"
-      subtitle="Lightcurve amplitude proxies elongation — larger amplitude = more elongated body · click any point">
+    <Card title="Detection Quality"
+      subtitle="More observations → stronger period signal">
       <div style={{display:"flex",gap:12,flexWrap:"wrap",padding:"6px 20px 0"}}>
         {groups.map(rc=><RDot key={rc} r={rc}/>)}
       </div>
@@ -252,7 +247,7 @@ export default function Explore({catalog,onSelect}) {
 
       {/* Row 2: period vs amplitude + color placeholder */}
       <div style={{display:"grid",gridTemplateColumns:"1.4fr 1fr",gap:16}}>
-        <AmpVsPeriod catalog={catalog} onSelect={onSelect}/>
+        <SNRvsNobs catalog={catalog} onSelect={onSelect}/>
         <ColorIndexPlaceholder/>
       </div>
 
