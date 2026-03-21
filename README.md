@@ -9,15 +9,19 @@ Implements a three-tier architecture: fast screening → period refinement → d
 LSST nightly stream
       │
   Tier 1: GLS + MBLS N=1          ← millions of objects, fast screening
+          Window function computed    cadence-specific alias detection
       │
   SNR > 3 and Nobs > 20?
       │ Yes
   Tier 2: MHAOV NH=2              ← thousands of objects, model-based
-           MBLS Nterms=2
-           Conditional Entropy
+           MBLS Nterms=2             window recomputed on finer grid
+           Conditional Entropy       contamination-weighted consensus
       │
   All 3 agree within 5%?
       │ Yes                No → Tier 3: CLEAN alias deconvolution → flag for follow-up
+      │
+  Reliability assessment
+  (fixed alias list + cadence-specific window alias check)
       │
   Publish period to catalog
 ```
@@ -28,11 +32,25 @@ LSST nightly stream
 |------|--------|-----|
 | 1 | GLS (Generalised Lomb-Scargle) | Fast, statistically correct baseline |
 | 1 | MBLS Nterms=1 | Multi-band leverage at low cost |
+| 1 | Window function | Cadence-specific alias identification |
 | 2 | MHAOV NH=2 | Real p-values, models double-hump directly |
 | 2 | MBLS Nterms=2 | Independent multi-band confirmation |
 | 2 | Conditional Entropy | Model-free validator |
-| 3 | CLEAN              | Alias deconvolution from window function |
 | 3 | CLEAN | Alias deconvolution from window function |
+
+## Alias detection (two layers)
+
+Every adopted period is checked against two independent alias detectors:
+
+**Layer 1 — Fixed list** (`reliability.py: flag_alias_risk`):
+Checks against well-known ground-based aliases: 0.5 day, 1 day, 2 day, 0.5 year, 1 year.
+
+**Layer 2 — Cadence-specific window** (`reliability.py: flag_window_alias`):
+Uses the spectral window function computed from this asteroid's actual observation
+timestamps. Catches dataset-specific aliases from LSST scheduling gaps, moon
+avoidance windows, and weather patterns that the fixed list misses entirely.
+Each asteroid has a unique observing history, so this check is different for
+every object. A period that sits on a window peak gets `r_flag = "cadence_alias"`.
 
 ## Data source
 
@@ -52,19 +70,20 @@ asteroid_pipeline/
 │   ├── preprocessing.py   # Band offsets, detrending, quality cuts
 │   ├── characterise.py    # Data regime classification (dense/sparse/multiyear)
 │   ├── geometry.py        # JPL Horizons geometry + HG phase correction
-│   ├── tier1.py           # Fast screening: GLS + MBLS
-│   ├── tier2.py           # Period refinement: MHAOV + MBLS + CE
+│   ├── tier1.py           # Fast screening: GLS + MBLS + window function
+│   ├── tier2.py           # Period refinement: MHAOV + MBLS + CE + window scoring
 │   ├── tier3.py           # Disambiguation: CLEAN alias deconvolution
-│   ├── reliability.py     # R-code reliability assessment
+│   ├── reliability.py     # R-code: fixed alias + cadence-specific window alias
 │   ├── catalog.py         # Results storage and output
-│   ├── window.py          # Spectral window function (alias visualisation)
+│   ├── window.py          # Spectral window function (used by tier1, tier2, reliability)
 │   ├── pipeline.py        # Orchestration — runs all tiers
 │   └── sources/
 │       └── lcdb.py        # LCDB lookup and comparison
 ├── notebooks/
 │   └── pipeline_colab.ipynb   # Main Colab notebook
 └── tests/
-    └── test_pipeline.py       # Unit tests for each module
+    ├── test_pipeline.py        # Unit tests for each module
+    └── test_mbls_regression.py # Regression tests for MBLS data path
 ```
 
 ## Quick start (Google Colab)
@@ -78,11 +97,22 @@ asteroid_pipeline/
 
 - `SNR_THRESHOLD` = 3.0 — minimum amplitude/noise ratio to proceed to Tier 2
 - `MIN_OBS` = 20 — minimum observations required
-- `PERIOD_MIN_HR` = 0.5 — shortest period to search (hours)
+- `PERIOD_MIN_HR` = 0.01 — hard floor; effective floor is data-driven from Nyquist cadence (typically ~0.047hr for Rubin)
 - `PERIOD_MAX_HR` = 24.0 — longest period to search (hours)
 - `AGREEMENT_TOL` = 0.05 — fractional tolerance for method agreement (5%)
 - `MHAOV_PVAL_THRESH` = 0.001 — significance threshold for period detection
-- `BAYESIAN_CI_THRESH` = 0.5 — max 95% CI width (hours) for tentative publish
+- `CLEAN_PEAK_RATIO` = 3.0 — minimum ratio of top CLEAN peak to second peak for tentative publish
+
+## Reliability (R-codes)
+
+| Code | Meaning | Catalog action |
+|------|---------|----------------|
+| R=3 | High confidence — all methods agree, dense data, p<0.001 | Publish |
+| R=2 | Moderate confidence — methods agree, sparse or marginal p | Publish with caveat |
+| R=1 | Low confidence — two-of-three agreement or Tier 3 tentative | Publish flagged |
+| R=0 | No reliable period | Do not publish |
+| R=-1 | Alias suspect (fixed list) | Do not publish — confirm independently |
+| R=-1 cadence_alias | Alias suspect (window-specific) | Do not publish — confirm independently |
 
 ## Notes on missing fields
 

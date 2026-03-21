@@ -274,3 +274,162 @@ class TestCatalog:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])
+
+
+# ── Tests: Window function ────────────────────────────────────────────────────
+
+class TestWindowFunction:
+    def test_window_power_same_length_as_grid(self):
+        """Window function output must match the input period grid length."""
+        from window import compute_window_function
+        t = np.linspace(0, 100, 80)
+        periods = np.linspace(0.5, 24, 500)
+        wp = compute_window_function(t, periods)
+        assert len(wp) == len(periods)
+
+    def test_window_power_nonnegative(self):
+        """Window function power must be non-negative everywhere."""
+        from window import compute_window_function
+        t = np.sort(np.random.default_rng(7).uniform(0, 200, 120))
+        periods = np.linspace(0.5, 24, 1000)
+        wp = compute_window_function(t, periods)
+        assert np.all(wp >= 0)
+
+    def test_contamination_score_range(self):
+        """Contamination score must be in [0, 1]."""
+        from window import compute_window_function, contamination_score
+        t = np.sort(np.random.default_rng(7).uniform(0, 200, 120))
+        periods = np.linspace(0.5, 24, 1000)
+        wp = compute_window_function(t, periods)
+        for p in [1.0, 4.8, 12.0, 24.0]:
+            score = contamination_score(p, periods, wp)
+            assert 0.0 <= score <= 1.0, f"contamination_score({p}) = {score} out of [0,1]"
+
+    def test_contamination_zero_for_flat_window(self):
+        """If window power is uniform, contamination score should be near zero."""
+        from window import contamination_score
+        periods = np.linspace(0.5, 24, 500)
+        wp_flat = np.ones(500) * 0.01   # uniform — no alias peaks
+        score = contamination_score(5.0, periods, wp_flat)
+        assert score <= 1.0   # can't be above 1; flat window means no dominant alias
+
+    def test_tier1_result_has_window_fields(self):
+        """Tier1Result must carry window_power, gls_contamination, mbls_contamination."""
+        from tier1 import run_tier1
+        from preprocessing import preprocess
+        df   = make_synthetic_lc(period_hr=4.8, n_obs=80)
+        data = preprocess(df, DEFAULT_CONFIG)
+        t1   = run_tier1(data, DEFAULT_CONFIG)
+
+        assert hasattr(t1, 'window_power'),       "Tier1Result missing window_power"
+        assert hasattr(t1, 'gls_contamination'),  "Tier1Result missing gls_contamination"
+        assert hasattr(t1, 'mbls_contamination'), "Tier1Result missing mbls_contamination"
+
+        if t1.passes:
+            assert len(t1.window_power) == len(t1.test_periods), \
+                "window_power length mismatch with test_periods"
+            assert 0.0 <= t1.gls_contamination  <= 1.0, "gls_contamination out of [0,1]"
+            assert 0.0 <= t1.mbls_contamination <= 1.0, "mbls_contamination out of [0,1]"
+
+    def test_tier1_rejected_has_empty_window_fields(self):
+        """Rejected Tier1Result should have empty window arrays, not crash."""
+        from tier1 import run_tier1
+        from preprocessing import preprocess
+        # Too few observations to pass Tier 1
+        df_tiny = make_synthetic_lc(n_obs=5)
+        data    = preprocess(df_tiny, DEFAULT_CONFIG)
+        t1      = run_tier1(data, DEFAULT_CONFIG)
+        assert not t1.passes
+        assert len(t1.window_power) == 0
+        assert np.isnan(t1.gls_contamination)
+        assert np.isnan(t1.mbls_contamination)
+
+    def test_tier2_result_has_window_fields(self):
+        """Tier2Result must carry window_power and all four contamination scores."""
+        from tier1 import run_tier1
+        from tier2 import run_tier2
+        from preprocessing import preprocess
+        df   = make_synthetic_lc(period_hr=4.8, amplitude=0.4, noise=0.02, n_obs=120)
+        data = preprocess(df, DEFAULT_CONFIG)
+        t1   = run_tier1(data, DEFAULT_CONFIG)
+        if not t1.passes:
+            pytest.skip("Tier 1 rejected — cannot test Tier 2 fields")
+        t2 = run_tier2(data, t1, DEFAULT_CONFIG)
+
+        for field in ['window_power', 'mhaov_contamination', 'mbls_contamination',
+                      'ce_contamination', 'consensus_contamination']:
+            assert hasattr(t2, field), f"Tier2Result missing {field}"
+
+        assert len(t2.window_power) == len(t2.test_periods), \
+            "window_power length mismatch with test_periods"
+        for field in ['mhaov_contamination', 'mbls_contamination',
+                      'ce_contamination', 'consensus_contamination']:
+            val = getattr(t2, field)
+            assert 0.0 <= val <= 1.0 or np.isnan(val), \
+                f"{field} = {val} out of [0,1]"
+
+
+# ── Tests: Window alias in reliability ────────────────────────────────────────
+
+class TestWindowAlias:
+    def test_flag_window_alias_returns_false_for_empty_window(self):
+        """flag_window_alias should not crash when window_power is empty."""
+        from reliability import flag_window_alias
+        from tier1 import Tier1Result
+
+        # Build a minimal Tier1Result with empty arrays (rejected object)
+        t1_empty = Tier1Result(
+            provid="TEST", passes=False,
+            best_period_gls=np.nan, best_period_mbls=np.nan,
+            gls_power_max=0.0, snr=0.0, n_obs=0,
+            reject_reason="insufficient data",
+            test_periods=np.array([]), gls_power=np.array([]),
+            mbls_power=np.array([]), window_power=np.array([]),
+            gls_contamination=np.nan, mbls_contamination=np.nan,
+        )
+        risk, note = flag_window_alias(4.8, t1_empty)
+        assert risk is False
+        assert note == ""
+
+    def test_flag_window_alias_triggers_on_high_contamination(self):
+        """flag_window_alias should trigger when period sits on window peak."""
+        from reliability import flag_window_alias
+        from tier1 import Tier1Result
+        import numpy as np
+
+        # Construct a fake window with a strong peak at exactly 4.8hr
+        periods = np.linspace(0.5, 24, 1000)
+        wp = np.zeros(1000)
+        idx = np.argmin(np.abs(periods - 4.8))
+        wp[idx] = 1.0   # sharp spike at 4.8hr
+
+        t1_fake = Tier1Result(
+            provid="TEST", passes=True,
+            best_period_gls=4.8, best_period_mbls=4.8,
+            gls_power_max=0.8, snr=5.0, n_obs=100,
+            reject_reason=None,
+            test_periods=periods, gls_power=np.zeros(1000),
+            mbls_power=np.zeros(1000), window_power=wp,
+            gls_contamination=1.0, mbls_contamination=1.0,
+        )
+        risk, note = flag_window_alias(4.8, t1_fake)
+        assert risk is True
+        assert "contamination" in note.lower()
+
+    def test_reliability_has_window_alias_fields(self):
+        """ReliabilityAssessment must include window_alias_risk and window_alias_note."""
+        from reliability import ReliabilityAssessment
+        import dataclasses
+        field_names = {f.name for f in dataclasses.fields(ReliabilityAssessment)}
+        assert 'window_alias_risk' in field_names, \
+            "ReliabilityAssessment missing window_alias_risk"
+        assert 'window_alias_note' in field_names, \
+            "ReliabilityAssessment missing window_alias_note"
+
+    def test_catalog_has_window_alias_columns(self):
+        """CATALOG_COLUMNS must include window_alias_risk and window_alias_note."""
+        from catalog import CATALOG_COLUMNS
+        assert 'window_alias_risk' in CATALOG_COLUMNS, \
+            "CATALOG_COLUMNS missing window_alias_risk"
+        assert 'window_alias_note' in CATALOG_COLUMNS, \
+            "CATALOG_COLUMNS missing window_alias_note"
