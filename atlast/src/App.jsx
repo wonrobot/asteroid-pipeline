@@ -50,18 +50,18 @@ const css = `
 
   /* Header */
   .header {
-    padding: 48px 0 40px;
-    border-bottom: 2px solid ${T.border};
-    margin-bottom: 32px;
+    padding: 32px 0 28px;
+    border-bottom: 1px solid ${T.border};
+    margin-bottom: 28px;
     display: grid;
     grid-template-columns: 1fr auto;
     gap: 24px;
-    align-items: end;
+    align-items: center;
   }
   .logo-row { display: flex; align-items: baseline; gap: 14px; margin-bottom: 8px; }
   .logo {
     font-family: 'Lora', serif;
-    font-size: 2.4rem;
+    font-size: 2.8rem;
     font-weight: 600;
     color: ${T.textPri};
     letter-spacing: -0.02em;
@@ -77,10 +77,11 @@ const css = `
     letter-spacing: 0.05em;
   }
   .header-tagline {
-    font-size: 0.9rem;
-    color: ${T.textSec};
-    line-height: 1.6;
-    max-width: 580px;
+    font-size: 0.82rem;
+    color: ${T.textDim};
+    line-height: 1.5;
+    max-width: 480px;
+    margin-top: 2px;
   }
   .stats-grid {
     display: flex;
@@ -93,18 +94,18 @@ const css = `
     height: fit-content;
   }
   .stat-cell {
-    padding: 14px 20px;
+    padding: 12px 18px;
     display: flex;
     flex-direction: column;
     gap: 2px;
     border-right: 1px solid ${T.border};
-    min-width: 90px;
+    min-width: 80px;
   }
   .stat-cell:last-child { border-right: none; }
   .stat-n {
     font-family: 'JetBrains Mono', monospace;
-    font-size: 1.3rem;
-    font-weight: 600;
+    font-size: 1.2rem;
+    font-weight: 700;
     color: ${T.accent};
     line-height: 1;
   }
@@ -400,14 +401,11 @@ export default function App() {
 
         <header className="header">
           <div>
-            <div className="logo-row">
+            <div style={{display:'flex',alignItems:'baseline',gap:12,marginBottom:6}}>
               <h1 className="logo" onClick={()=>{setPage("explore");setSelected(null);}} style={{cursor:"pointer"}}>ATL<span>AST</span></h1>
-              <span className="logo-version">v0.1-beta · 76 objects</span>
             </div>
             <p className="header-tagline">
-              Asteroid Temporal Lightcurve Analysis &amp; Spin Tracking.
-              Rotation periods derived from Rubin/LSST commissioning photometry
-              using a three-tier multi-method detection pipeline.
+              Asteroid Temporal Lightcurve Analysis &amp; Spin Tracking · LSST commissioning data
             </p>
           </div>
           <div style={{display:'flex',flexDirection:'column',gap:10,alignItems:'flex-end'}}>
