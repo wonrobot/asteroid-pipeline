@@ -30,17 +30,15 @@ const BASE = {
 const PLOT_MARGIN = {t:24, b:44, l:58, r:24};
 
 // Log axis config with clean tick formatting
-const LOG_XAXIS = (periods) => {
-  const mn = Math.floor(Math.log10(Math.min(...periods)*0.95));
-  const mx = Math.ceil(Math.log10(Math.max(...periods)*1.05));
-  return {
-    title:{text:"Period (hr)"},
-    type:"log",
-    gridcolor:"#e8edf5", linecolor:"#cbd5e1",
-    tickformat:".2~g",
-    range:[mn, mx],
-  };
-};
+const LOG_XAXIS = () => ({
+  title:{text:"Period (hr)"},
+  type:"log",
+  gridcolor:"#e8edf5", linecolor:"#cbd5e1",
+  tickformat:".3~g",
+  range:[Math.log10(0.3), Math.log10(25)],
+  tickvals:[0.5,1,2,3,4,5,6,7,8,9,10,12,15,20,24],
+  ticktext:["0.5","1","2","3","4","5","6","7","8","9","10","12","15","20","24"],
+});
 
 // Period marker as scatter trace with text label at top
 function pline(x, label, color, dash, maxPow) {
@@ -68,17 +66,12 @@ function periodMarkers(P, periods, maxPow) {
   ].filter(Boolean);
 }
 
-// Inline legend chip row
+// Colored text label row (no line icons)
 function LegendRow({ items }) {
   return (
-    <div style={{display:"flex",gap:12,flexWrap:"wrap",padding:"2px 4px 6px",alignItems:"center"}}>
-      {items.map(({color,dash,label})=>(
-        <span key={label} style={{display:"flex",alignItems:"center",gap:5,fontSize:"0.68rem",color:"#475569"}}>
-          <svg width="24" height="10">
-            <line x1="0" y1="5" x2="24" y2="5"
-              stroke={color} strokeWidth="2"
-              strokeDasharray={dash==="dot"?"3,3":dash==="dash"?"6,3":dash==="dashdot"?"6,3,2,3":"none"}/>
-          </svg>
+    <div style={{display:"flex",gap:14,flexWrap:"wrap",padding:"2px 4px 6px",alignItems:"center"}}>
+      {items.map(({color,label})=>(
+        <span key={label} style={{fontSize:"0.68rem",fontWeight:600,color,letterSpacing:"0.01em"}}>
           {label}
         </span>
       ))}
@@ -105,12 +98,7 @@ function TierSection({ title, period, children }) {
       <div style={{display:"flex",alignItems:"baseline",gap:10,padding:"6px 4px 0"}}>
         <span style={{fontSize:"0.65rem",fontWeight:700,color:"#475569",
           textTransform:"uppercase",letterSpacing:"0.08em"}}>{title}</span>
-        {period && (
-          <span style={{fontSize:"0.65rem",fontFamily:"JetBrains Mono,monospace",
-            color:"#2563eb",background:"#dbeafe",padding:"1px 7px",borderRadius:3}}>
-            P = {period.toFixed(4)} hr
-          </span>
-        )}
+
       </div>
       {children}
     </div>
@@ -150,7 +138,7 @@ export default function AsteroidCharts({ provid }) {
 
   /* ── Periodogram shared ── */
   const maxMBLS = Math.max(...pg.mbls_power);
-  const xaxis   = LOG_XAXIS(pg.periods);
+  const xaxis   = LOG_XAXIS();
   const markers = periodMarkers(P, pg.periods, maxMBLS);
 
   // Method disagreement lines for R=0
@@ -191,16 +179,22 @@ export default function AsteroidCharts({ provid }) {
   /* T3 — Conditional Entropy + Window function */
   const maxCE = pg.ce_scores ? Math.max(...pg.ce_scores) : 1;
   const minCE = pg.ce_scores ? Math.min(...pg.ce_scores) : 0;
+  const ceDetected = pg.ce_scores && minCE < 0.95; // CE=1.0 means no detection
+  const alias12in = 12 >= 0.3 && 12 <= 25;
+  const alias24in = 24 >= 0.3 && 24 <= 25;
   const t3Traces = [
     ...(P?markers.map(m=>({...m,showlegend:false})):methodLines),
+    // 12h/24h alias lines for T3 context
+    ...(alias12in?[pline(12,"12h alias","#dc2626","dashdot",maxMBLS)]:[] ),
+    ...(alias24in?[pline(24,"24h alias","#dc2626","dashdot",maxMBLS)]:[] ),
     ...(pg.window_periods&&pg.window_power ? [{
       x:pg.window_periods,
-      y:pg.window_power.map(v=>v/Math.max(...pg.window_power)*maxMBLS*0.3),
-      mode:"lines", line:{color:"#f59e0b",width:0.8},
-      fill:"tozeroy", fillcolor:"rgba(245,158,11,0.07)",
+      y:pg.window_power.map(v=>v/Math.max(...pg.window_power)*maxMBLS*0.35),
+      mode:"lines", line:{color:"#f59e0b",width:1},
+      fill:"tozeroy", fillcolor:"rgba(245,158,11,0.08)",
       name:"Window", type:"scatter",showlegend:false,
     }] : []),
-    ...(pg.ce_periods&&pg.ce_scores ? [{
+    ...(ceDetected && pg.ce_periods&&pg.ce_scores ? [{
       x:pg.ce_periods, y:pg.ce_scores.map(v=>v/maxCE*maxMBLS*0.9),
       mode:"lines", line:{color:"#0e7490",width:1.3},
       name:"CE", type:"scatter",showlegend:false,
@@ -247,11 +241,7 @@ export default function AsteroidCharts({ provid }) {
     divider:{borderBottom:"1px dashed #e2e8f0",margin:"4px 0"},
   };
 
-  const sharedMarkerLegend = P ? [
-    {color:"#111827",dash:"solid",label:`P = ${P.toFixed(3)} hr`},
-    {color:"#d97706",dash:"dot",  label:`P/2 = ${(P/2).toFixed(3)} hr`},
-    {color:"#d97706",dash:"dot",  label:`2P = ${(P*2).toFixed(3)} hr`},
-  ] : [];
+  const sharedMarkerLegend = []; // removed — labels shown on lines directly
 
   return (
     <div style={{marginTop:"1rem"}}>
@@ -266,7 +256,7 @@ export default function AsteroidCharts({ provid }) {
 
       {/* ── Lightcurve ── */}
       {tab==="lc" && <>
-        <LegendRow items={bands.map(b=>({color:BC[b],dash:"none",label:BAND_FULL[b]||b}))} />
+        <LegendRow items={bands.map(b=>({color:BC[b],label:BAND_FULL[b]||b}))} />
         <Plot traces={lcTraces} layout={{
           ...BASE, margin:PLOT_MARGIN,
           title:{text:"Lightcurve",font:{size:12,color:"#0f172a"}},
@@ -277,11 +267,10 @@ export default function AsteroidCharts({ provid }) {
 
       {/* ── Periodogram ── */}
       {tab==="pgram" && <>
-        <TierSection title="Tier 1 — Generalised Lomb-Scargle (GLS) · Multi-Band Lomb-Scargle (MBLS)" period={P}>
+        <TierSection title="Tier 1 — Fast Scan" period={P}>
           <LegendRow items={[
-            {color:"#1d4ed8",dash:"solid",label:"Multi-Band Lomb-Scargle (MBLS)"},
-            {color:"#0d9488",dash:"dash", label:"Generalised Lomb-Scargle (GLS, normalised)"},
-            ...sharedMarkerLegend,
+            {color:"#1d4ed8",label:"Multi-Band Lomb-Scargle (MBLS)"},
+            {color:"#0d9488",label:"Generalised Lomb-Scargle (GLS, normalised)"},
           ]}/>
           <Plot traces={t1Traces} layout={{
             ...BASE, margin:PLOT_MARGIN,
@@ -293,11 +282,10 @@ export default function AsteroidCharts({ provid }) {
 
         <div style={S.divider}/>
 
-        <TierSection title="Tier 2 — Multi-Harmonic Analysis of Variance (MHAOV) · Multi-Band Lomb-Scargle (MBLS)" period={P}>
+        <TierSection title="Tier 2 — High-Order Methods" period={P}>
           <LegendRow items={[
-            {color:"#ea580c",dash:"solid",label:"Multi-Band Lomb-Scargle (MBLS)"},
-            {color:"#9333ea",dash:"dot",  label:"Multi-Harmonic AoV (MHAOV, normalised)"},
-            ...sharedMarkerLegend,
+            {color:"#ea580c",label:"Multi-Band Lomb-Scargle (MBLS)"},
+            {color:"#9333ea",label:"Multi-Harmonic Analysis of Variance (MHAOV, normalised)"},
           ]}/>
           <Plot traces={t2Traces} layout={{
             ...BASE, margin:PLOT_MARGIN,
@@ -313,9 +301,9 @@ export default function AsteroidCharts({ provid }) {
 
         <TierSection title="Tier 3 — Conditional Entropy (CE) · Window Function" period={P}>
           <LegendRow items={[
-            {color:"#0e7490",dash:"solid",label:"Conditional Entropy (CE, normalised)"},
-            {color:"#f59e0b",dash:"solid",label:"Window function (normalised)"},
-            ...sharedMarkerLegend,
+            ...(ceDetected?[{color:"#0e7490",label:"Conditional Entropy (CE, normalised)"}]:[]),
+            {color:"#f59e0b",label:"Window function (normalised)"},
+            {color:"#dc2626",label:"12h / 24h calendar aliases"},
           ]}/>
           <Plot traces={t3Traces} layout={{
             ...BASE, margin:PLOT_MARGIN,
@@ -323,7 +311,10 @@ export default function AsteroidCharts({ provid }) {
             yaxis:{title:{text:"Power / CE"},gridcolor:"#e8edf5",linecolor:"#cbd5e1"},
           }} height={200}/>
           {pg.ce_scores && (
-            <StatLine items={[{label:"CE minimum score",value:minCE.toFixed(4)}]}/>
+            <StatLine items={ceDetected
+              ? [{label:"CE minimum score",value:minCE.toFixed(4)}]
+              : [{label:"Conditional Entropy",value:"no detection (CE ≈ 1.0 — period not constrained by this method)"}]
+            }/>
           )}
         </TierSection>
       </>}
@@ -331,8 +322,8 @@ export default function AsteroidCharts({ provid }) {
       {/* ── Phase fold ── */}
       {tab==="fold" && d.fold && <>
         <LegendRow items={[
-          ...bands.map(b=>({color:BC[b],dash:"none",label:BAND_FULL[b]||b})),
-          {color:"#111827",dash:"solid",label:"Fitted model"},
+          ...bands.map(b=>({color:BC[b],label:BAND_FULL[b]||b})),
+          {color:"#111827",label:"Fitted model"},
         ]}/>
         <div style={{display:"flex",flexDirection:"column",gap:0}}>
           <Plot traces={foldTraces} layout={{
