@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import Plotly from "plotly.js-dist";
 
 const BC = { g:"#22c55e", r:"#f97316", i:"#3b82f6" };
-const BAND_FULL = { g:"g-band (green)", r:"r-band (red)", i:"i-band (infrared)" };
+const BAND_FULL = { g:"g-band (green)", r:"r-band (orange)", i:"i-band (blue)" };
 
 function nightMap(mjd) {
   const days = [...new Set(mjd.map(m=>Math.floor(m)))].sort((a,b)=>a-b);
@@ -23,38 +23,104 @@ function Plot({ traces, layout, height=280 }) {
 const BASE = {
   paper_bgcolor:"transparent", plot_bgcolor:"#fafbff",
   font:{family:"Inter,sans-serif", color:"#475569", size:11},
-  legend:{bgcolor:"rgba(255,255,255,0.9)", bordercolor:"#e2e8f0", borderwidth:1, font:{size:10}},
+  showlegend: false,
   hovermode:"closest",
 };
 
-function makeMarginLayout(t=40,b=48,l=58,r=20) {
-  return {margin:{t,b,l,r}};
+const PLOT_MARGIN = {t:24, b:44, l:58, r:24};
+
+// Log axis config with clean tick formatting
+const LOG_XAXIS = (periods) => {
+  const mn = Math.floor(Math.log10(Math.min(...periods)*0.95));
+  const mx = Math.ceil(Math.log10(Math.max(...periods)*1.05));
+  return {
+    title:{text:"Period (hr)"},
+    type:"log",
+    gridcolor:"#e8edf5", linecolor:"#cbd5e1",
+    tickformat:".2~g",
+    range:[mn, mx],
+  };
+};
+
+// Period marker as scatter trace with text label at top
+function pline(x, label, color, dash, maxPow) {
+  return {
+    x:[x, x], y:[0, maxPow],
+    mode:"lines+text",
+    line:{color, width: dash==="solid"?2:1.5, dash},
+    text:["", label],
+    textposition:"top center",
+    textfont:{size:9, color},
+    name:label, type:"scatter", showlegend:false,
+    hovertemplate:`${label}<extra></extra>`,
+  };
 }
 
-// Vertical marker line as scatter trace
-function vline(x, name, color, dash="solid") {
-  return {x:[x,x], y:[0,1], yaxis_ref:"paper", mode:"lines",
-    line:{color,width:1.8,dash}, name, type:"scatter", showlegend:true,
-    hovertemplate:`${name}: ${typeof x==="number"?x.toFixed(3)+"h":x}<extra></extra>`};
-}
-
-// Build shared period marker traces
-function periodMarkers(P, periods) {
+function periodMarkers(P, periods, maxPow) {
   if (!P) return [];
   const mn = Math.min(...periods), mx = Math.max(...periods);
-  const mk = (x,name,color,dash) => x>=mn&&x<=mx ? vline(x,name,color,dash) : null;
+  const mk = (x, label, color, dash) =>
+    x>=mn && x<=mx ? pline(x, label, color, dash, maxPow) : null;
   return [
-    mk(P,    `P=${P.toFixed(3)}h`,       "#2563eb","solid"),
-    mk(P/2,  `P/2=${(P/2).toFixed(3)}h`, "#f59e0b","dot"),
-    mk(P*2,  `2P=${(P*2).toFixed(3)}h`,  "#f59e0b","dot"),
-
+    mk(P,   `P=${P.toFixed(3)}h`,      "#111827","solid"),
+    mk(P/2, `P/2=${(P/2).toFixed(3)}h`,"#d97706","dot"),
+    mk(P*2, `2P=${(P*2).toFixed(3)}h`, "#d97706","dot"),
   ].filter(Boolean);
 }
 
-export default function AsteroidCharts({ provid, period }) {
+// Inline legend chip row
+function LegendRow({ items }) {
+  return (
+    <div style={{display:"flex",gap:12,flexWrap:"wrap",padding:"2px 4px 6px",alignItems:"center"}}>
+      {items.map(({color,dash,label})=>(
+        <span key={label} style={{display:"flex",alignItems:"center",gap:5,fontSize:"0.68rem",color:"#475569"}}>
+          <svg width="24" height="10">
+            <line x1="0" y1="5" x2="24" y2="5"
+              stroke={color} strokeWidth="2"
+              strokeDasharray={dash==="dot"?"3,3":dash==="dash"?"6,3":dash==="dashdot"?"6,3,2,3":"none"}/>
+          </svg>
+          {label}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+// Stat line below panel
+function StatLine({ items }) {
+  return (
+    <div style={{fontSize:"0.68rem",color:"#64748b",padding:"2px 4px 6px",
+      fontFamily:"JetBrains Mono,monospace",display:"flex",gap:20,flexWrap:"wrap"}}>
+      {items.map(({label,value})=>(
+        <span key={label}>{label}: <strong style={{color:"#0f172a"}}>{value}</strong></span>
+      ))}
+    </div>
+  );
+}
+
+// Tier section wrapper
+function TierSection({ title, period, children }) {
+  return (
+    <div style={{marginBottom:4}}>
+      <div style={{display:"flex",alignItems:"baseline",gap:10,padding:"6px 4px 0"}}>
+        <span style={{fontSize:"0.65rem",fontWeight:700,color:"#475569",
+          textTransform:"uppercase",letterSpacing:"0.08em"}}>{title}</span>
+        {period && (
+          <span style={{fontSize:"0.65rem",fontFamily:"JetBrains Mono,monospace",
+            color:"#2563eb",background:"#dbeafe",padding:"1px 7px",borderRadius:3}}>
+            P = {period.toFixed(4)} hr
+          </span>
+        )}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+export default function AsteroidCharts({ provid }) {
   const [d, setD]     = useState(null);
   const [err, setErr] = useState(false);
-  const [tab, setTab] = useState("lc");
+  const [tab, setTab] = useState("fold");
 
   useEffect(() => {
     if (!provid) return;
@@ -68,216 +134,224 @@ export default function AsteroidCharts({ provid, period }) {
   if (err) return <p style={{color:"#94a3b8",fontSize:"0.78rem",marginTop:12}}>No chart data available.</p>;
   if (!d)  return <p style={{color:"#94a3b8",fontSize:"0.78rem",marginTop:12}}>Loading…</p>;
 
-  const ni    = nightMap(d.obs.mjd);
-  const bands = [...new Set(d.obs.band)];
-  const P     = d.best_period;
-  const pg    = d.pgram;
+  const bands  = [...new Set(d.obs.band)];
+  const P      = d.best_period;
+  const pg     = d.pgram;
 
-  /* ── Lightcurve: colored by BAND, symbol by night ── */
-  const nightSymbols = ["circle","square","diamond","triangle-up","triangle-down","pentagon","hexagon","star","cross","x"];
-  const nights = [...new Set(ni)];
-  const lcTraces = bands.map(b => {
-    // Split by night for symbol variation
-    const subTraces = nights.map(n => {
-      const idx = ni.map((v,i)=>v===n&&d.obs.band[i]===b?i:-1).filter(i=>i>=0);
-      if (!idx.length) return null;
-      return {
-        x: idx.map(i=>d.obs.mjd[i]), y: idx.map(i=>d.obs.mag[i]),
-        error_y:{type:"data",array:idx.map(i=>d.obs.magerr[i]),visible:true,color:BC[b]+"55",thickness:1},
-        mode:"markers",
-        marker:{color:BC[b], size:4, symbol:nightSymbols[n%10], opacity:0.85},
-        name:`${b}-band · Night ${n+1}`, type:"scatter",
-        legendgroup:b,
-        showlegend: n===nights.filter(nn=>idx.some((_,i)=>ni[idx[0]]===nn))[0],
-      };
-    }).filter(Boolean);
-    return subTraces;
-  }).flat();
-
-  // Simpler: one trace per band (all nights merged), night shown by opacity gradient
-  const lcSimple = bands.map(b => ({
+  /* ── Lightcurve ── */
+  const lcTraces = bands.map(b=>({
     x: d.obs.mjd.filter((_,i)=>d.obs.band[i]===b),
     y: d.obs.mag.filter((_,i)=>d.obs.band[i]===b),
-    error_y:{type:"data",
-      array:d.obs.magerr.filter((_,i)=>d.obs.band[i]===b),
-      visible:true, color:BC[b]+"55", thickness:1},
-    mode:"markers", marker:{color:BC[b], size:4, symbol:"circle", opacity:0.85},
-    name:BAND_FULL[b]||b, type:"scatter",
+    error_y:{type:"data",array:d.obs.magerr.filter((_,i)=>d.obs.band[i]===b),
+      visible:true,color:BC[b]+"55",thickness:1},
+    mode:"markers", marker:{color:BC[b],size:4,symbol:"circle",opacity:0.85},
+    name:BAND_FULL[b]||b, type:"scatter", showlegend:false,
   }));
 
-  const lcLayout = {
-    ...BASE, ...makeMarginLayout(),
-    title:{text:"Lightcurve", font:{size:12,color:"#0f172a"}},
-    xaxis:{title:{text:"MJD"},gridcolor:"#e8edf5",linecolor:"#cbd5e1"},
-    yaxis:{title:{text:"mag"},autorange:"reversed",gridcolor:"#e8edf5",linecolor:"#cbd5e1"},
-  };
+  /* ── Periodogram shared ── */
+  const maxMBLS = Math.max(...pg.mbls_power);
+  const xaxis   = LOG_XAXIS(pg.periods);
+  const markers = periodMarkers(P, pg.periods, maxMBLS);
 
-  /* ── Periodogram — 3 stacked panels sharing period markers ── */
-  const markers = periodMarkers(P, pg.periods);
-
-  // For R=0 / no best_period: show each method's period as lines to visualise disagreement
-  const METHOD_COLORS = {mhaov:"#7c3aed", mbls:"#2563eb", ce:"#0891b2", gls:"#059669"};
+  // Method disagreement lines for R=0
+  const METHOD_COLORS = {mhaov:"#9333ea",mbls:"#ea580c",ce:"#0e7490",gls:"#059669"};
   const methodLines = (() => {
-    if (!d.method_periods) return [];
-    const mn = Math.min(...pg.periods), mx = Math.max(...pg.periods);
-    const maxPow = Math.max(...pg.mbls_power);
+    if (P || !d.method_periods) return [];
+    const mn=Math.min(...pg.periods), mx=Math.max(...pg.periods);
     return Object.entries(d.method_periods)
       .filter(([,v])=>v&&v>=mn&&v<=mx)
-      .map(([name,val])=>({
-        x:[val,val], y:[0,maxPow], mode:"lines",
-        line:{color:METHOD_COLORS[name]||"#94a3b8", width:1.5, dash:"dashdot"},
-        name:`${name.toUpperCase()} ${val.toFixed(3)}h`,
-        type:"scatter", showlegend:true,
-      }));
+      .map(([name,val])=>pline(val,`${name.toUpperCase()} ${val.toFixed(3)}h`,
+        METHOD_COLORS[name]||"#94a3b8","dashdot",maxMBLS));
   })();
-  const xaxis_shared = {title:{text:"Period (hr)"},type:"log",gridcolor:"#e8edf5",linecolor:"#cbd5e1",
-    range: pg.periods ? [Math.log10(Math.min(...pg.periods)), Math.log10(Math.max(...pg.periods))] : undefined};
 
-  // Panel 1 — Tier 1 fast scan
-  const t1max = Math.max(...pg.mbls_power);
+  /* T1 — Generalised Lomb-Scargle + Multi-Band Lomb-Scargle */
+  const maxGLS = pg.gls_power ? Math.max(...pg.gls_power) : 1;
+  const glsNorm = pg.gls_power ? pg.gls_power.map(v=>v/maxGLS*maxMBLS*0.7) : [];
   const t1Traces = [
-    ...(P ? [] : methodLines),
-    {x:pg.gls_periods||pg.periods, y:pg.gls_power||[], mode:"lines", line:{color:"#059669",width:1,dash:"dash"}, name:"GLS", type:"scatter"},
-    {x:pg.periods, y:pg.mbls_power, mode:"lines", line:{color:"#2563eb",width:1.2}, name:"MBLS (T1)", type:"scatter"},
-    ...markers,
+    ...(P?markers:methodLines),
+    {x:pg.gls_periods||pg.periods, y:glsNorm, mode:"lines",
+      line:{color:"#0d9488",width:1,dash:"dash"}, name:"GLS", type:"scatter",showlegend:false},
+    {x:pg.periods, y:pg.mbls_power, mode:"lines",
+      line:{color:"#1d4ed8",width:1.3}, name:"MBLS", type:"scatter",showlegend:false},
   ];
+  const glsPeak = pg.gls_power ? Math.max(...pg.gls_power).toFixed(3) : null;
 
-  // Panel 2 — Tier 2
-  const t2Traces = [];
-  if (pg.mhaov_power) {
-    const s = t1max/Math.max(...pg.mhaov_power)*0.9;
-    t2Traces.push({x:pg.periods, y:pg.mhaov_power.map(v=>v*s), mode:"lines", line:{color:"#7c3aed",width:1.2}, name:"MHAOV (norm.)", type:"scatter"});
-  }
-  const t2mbls = pg.mbls_power; // already on same scale
-  t2Traces.push({x:pg.periods, y:t2mbls, mode:"lines", line:{color:"#2563eb",width:1}, name:"MBLS (T2)", type:"scatter", showlegend:true});
-  t2Traces.push(...markers.map(m=>({...m,showlegend:false})));
+  /* T2 — Multi-Harmonic AoV + Multi-Band Lomb-Scargle */
+  const maxMHAOV = pg.mhaov_power ? Math.max(...pg.mhaov_power) : 1;
+  const mhaovNorm = pg.mhaov_power ? pg.mhaov_power.map(v=>v/maxMHAOV*maxMBLS*0.85) : [];
+  const t2Traces = [
+    ...(P?markers.map(m=>({...m,showlegend:false})):methodLines),
+    {x:pg.periods, y:mhaovNorm, mode:"lines",
+      line:{color:"#9333ea",width:1.3,dash:"dot"}, name:"MHAOV", type:"scatter",showlegend:false},
+    {x:pg.periods, y:pg.mbls_power, mode:"lines",
+      line:{color:"#ea580c",width:1.3}, name:"MBLS", type:"scatter",showlegend:false},
+  ];
+  const pval = pg.p_value;
 
-  // Panel 3 — CE / window
-  const t3Traces = [];
-  if (pg.ce_periods && pg.ce_scores) {
-    t3Traces.push({x:pg.ce_periods, y:pg.ce_scores, mode:"lines", line:{color:"#0891b2",width:1.2}, name:"Conditional Entropy", type:"scatter"});
-  }
-  if (pg.window_periods && pg.window_power) {
-    const wmax = Math.max(...pg.window_power);
-    t3Traces.push({x:pg.window_periods, y:pg.window_power.map(v=>v/wmax*t1max*0.5),
-      mode:"lines", line:{color:"#f97316",width:0.8}, fill:"tozeroy", fillcolor:"rgba(249,115,22,0.06)",
-      name:"Window fn (norm.)", type:"scatter"});
-  }
-  if (t3Traces.length === 0) {
-    t3Traces.push({x:[],y:[], type:"scatter", name:"No T3 data"});
-  }
-  t3Traces.push(...markers.map(m=>({...m,showlegend:false})));
-
-  const pgramBase = {...BASE, ...makeMarginLayout(28,40,58,20)};
+  /* T3 — Conditional Entropy + Window function */
+  const maxCE = pg.ce_scores ? Math.max(...pg.ce_scores) : 1;
+  const minCE = pg.ce_scores ? Math.min(...pg.ce_scores) : 0;
+  const t3Traces = [
+    ...(P?markers.map(m=>({...m,showlegend:false})):methodLines),
+    ...(pg.window_periods&&pg.window_power ? [{
+      x:pg.window_periods,
+      y:pg.window_power.map(v=>v/Math.max(...pg.window_power)*maxMBLS*0.3),
+      mode:"lines", line:{color:"#f59e0b",width:0.8},
+      fill:"tozeroy", fillcolor:"rgba(245,158,11,0.07)",
+      name:"Window", type:"scatter",showlegend:false,
+    }] : []),
+    ...(pg.ce_periods&&pg.ce_scores ? [{
+      x:pg.ce_periods, y:pg.ce_scores.map(v=>v/maxCE*maxMBLS*0.9),
+      mode:"lines", line:{color:"#0e7490",width:1.3},
+      name:"CE", type:"scatter",showlegend:false,
+    }] : []),
+  ];
 
   /* ── Phase fold ── */
   const foldTraces = d.fold ? [
     ...bands.map(b=>({
       x:d.fold.phase.filter((_,i)=>d.fold.band[i]===b),
       y:d.fold.mag.filter((_,i)=>d.fold.band[i]===b),
-      error_y:{type:"data",array:d.fold.magerr.filter((_,i)=>d.fold.band[i]===b),visible:true,color:BC[b]+"55",thickness:1},
-      mode:"markers", marker:{color:BC[b],size:3.5,opacity:0.85},
-      name:BAND_FULL[b]||b, type:"scatter",
+      error_y:{type:"data",array:d.fold.magerr.filter((_,i)=>d.fold.band[i]===b),
+        visible:true,color:BC[b]+"55",thickness:1},
+      mode:"markers",marker:{color:BC[b],size:3.5,opacity:0.85},
+      name:BAND_FULL[b]||b,type:"scatter",showlegend:false,
     })),
-    {x:d.fold.fitted_phase, y:d.fold.fitted_mag, mode:"lines",
-      line:{color:"#0f172a",width:2}, name:"model", type:"scatter"},
+    {x:d.fold.fitted_phase,y:d.fold.fitted_mag,mode:"lines",
+      line:{color:"#111827",width:2},name:"model",type:"scatter",showlegend:false},
   ] : null;
 
   const residTraces = d.fold ? bands.map(b=>{
-    const fp=d.fold.fitted_phase, fm=d.fold.fitted_mag;
+    const fp=d.fold.fitted_phase,fm=d.fold.fitted_mag;
     const interp=ph=>fm[fp.reduce((bi,_,i)=>Math.abs(fp[i]-ph)<Math.abs(fp[bi]-ph)?i:bi,0)];
     const phases=d.fold.phase.filter((_,i)=>d.fold.band[i]===b);
     const mags=d.fold.mag.filter((_,i)=>d.fold.band[i]===b);
-    return {x:phases, y:mags.map((m,i)=>m-interp(phases[i])),
-      mode:"markers", marker:{color:BC[b],size:3,opacity:0.7},
-      name:b, type:"scatter", showlegend:false};
+    return {x:phases,y:mags.map((m,i)=>m-interp(phases[i])),
+      mode:"markers",marker:{color:BC[b],size:3,opacity:0.7},
+      name:b,type:"scatter",showlegend:false};
   }) : null;
 
   const tabs = [
     ...(d.fold?[{id:"fold",label:"Phase Fold"}]:[]),
-    {id:"pgram", label:"Periodogram"},
-    {id:"lc",    label:"Lightcurve"},
+    {id:"pgram",label:"Periodogram"},
+    {id:"lc",label:"Lightcurve"},
   ];
-  // Default to fold if available
-  const defaultTab = d.fold ? "fold" : "pgram";
 
   const S = {
     bar:{display:"flex",gap:4,alignItems:"center",marginBottom:8,flexWrap:"wrap"},
     tab:{fontFamily:"Inter,sans-serif",fontSize:"0.72rem",fontWeight:500,padding:"4px 14px",
       border:"1px solid #dde3f0",borderRadius:5,background:"#f7f8fc",color:"#475569",cursor:"pointer"},
     on:{background:"#2563eb",color:"#fff",borderColor:"#2563eb"},
-    pill:{marginLeft:"auto",fontFamily:"JetBrains Mono,monospace",fontSize:"0.72rem",color:"#2563eb",
-      background:"#dbeafe",padding:"3px 10px",borderRadius:4,fontWeight:600},
-    pLabel:{fontSize:"0.65rem",color:"#94a3b8",padding:"2px 6px",background:"#f1f5f9",borderRadius:3,fontFamily:"JetBrains Mono,monospace"},
-    pgTitle:{fontSize:"0.68rem",fontWeight:600,color:"#475569",textTransform:"uppercase",
-      letterSpacing:"0.06em",padding:"6px 0 2px 4px"},
-    divider:{borderBottom:"1px dashed #e2e8f0",margin:"2px 0"},
+    pill:{marginLeft:"auto",fontFamily:"JetBrains Mono,monospace",fontSize:"0.72rem",
+      color:"#2563eb",background:"#dbeafe",padding:"3px 10px",borderRadius:4,fontWeight:600},
+    divider:{borderBottom:"1px dashed #e2e8f0",margin:"4px 0"},
   };
+
+  const sharedMarkerLegend = P ? [
+    {color:"#111827",dash:"solid",label:`P = ${P.toFixed(3)} hr`},
+    {color:"#d97706",dash:"dot",  label:`P/2 = ${(P/2).toFixed(3)} hr`},
+    {color:"#d97706",dash:"dot",  label:`2P = ${(P*2).toFixed(3)} hr`},
+  ] : [];
 
   return (
     <div style={{marginTop:"1rem"}}>
       <div style={S.bar}>
-        {tabs.map(t=><button key={t.id} style={{...S.tab,...(tab===t.id?S.on:{})}} onClick={()=>setTab(t.id)}>{t.label}</button>)}
+        {tabs.map(t=>(
+          <button key={t.id} style={{...S.tab,...(tab===t.id?S.on:{})}} onClick={()=>setTab(t.id)}>
+            {t.label}
+          </button>
+        ))}
         {P && <span style={S.pill}>P = {P.toFixed(4)} hr</span>}
       </div>
 
+      {/* ── Lightcurve ── */}
       {tab==="lc" && <>
-        <Plot traces={lcSimple} layout={lcLayout} height={290}/>
-
+        <LegendRow items={bands.map(b=>({color:BC[b],dash:"none",label:BAND_FULL[b]||b}))} />
+        <Plot traces={lcTraces} layout={{
+          ...BASE, margin:PLOT_MARGIN,
+          title:{text:"Lightcurve",font:{size:12,color:"#0f172a"}},
+          xaxis:{title:{text:"MJD"},gridcolor:"#e8edf5",linecolor:"#cbd5e1"},
+          yaxis:{title:{text:"mag"},autorange:"reversed",gridcolor:"#e8edf5",linecolor:"#cbd5e1"},
+        }} height={290}/>
       </>}
 
+      {/* ── Periodogram ── */}
       {tab==="pgram" && <>
-        <div style={S.pgTitle}>Tier 1 — Fast scan (GLS · MBLS)</div>
-        <Plot traces={t1Traces} layout={{...pgramBase,
-          title:{text:"", font:{size:11}},
-          xaxis:{...xaxis_shared, title:{text:"Period (hr)"}},
-          yaxis:{title:{text:"Power"},gridcolor:"#e8edf5",linecolor:"#cbd5e1"},
-          legend:{...BASE.legend, x:1.02, xanchor:"left", y:1},
-        }} height={200}/>
-        <div style={S.divider}/>
-        <div style={S.pgTitle}>Tier 2 — High-order (MHAOV · MBLS)</div>
-        <Plot traces={t2Traces} layout={{...pgramBase,
-          xaxis:{...xaxis_shared, title:{text:"Period (hr)"}},
-          yaxis:{title:{text:"Power"},gridcolor:"#e8edf5",linecolor:"#cbd5e1"},
-          legend:{...BASE.legend, x:1.02, xanchor:"left", y:1},
-        }} height={200}/>
-        {d.r_code !== 0 && d.pgram.p_value !== undefined && (
-          <div style={{fontSize:"0.7rem",color:"#475569",padding:"3px 10px 6px",
-            fontFamily:"JetBrains Mono,monospace",display:"flex",gap:16}}>
-            <span>MHAOV significance: <strong>p = {d.pgram.p_value?.toExponential(2)}</strong></span>
-          </div>
-        )}
-        <div style={S.divider}/>
-        <div style={S.pgTitle}>Tier 3 — {pg.ce_periods?"Conditional Entropy (CE)":"Window function"}</div>
-        <Plot traces={t3Traces} layout={{...pgramBase, ...makeMarginLayout(28,48,58,16),
-          xaxis:{...xaxis_shared, title:{text:"Period (hr)"}},
-          yaxis:{title:{text:pg.ce_periods?"CE score":"Power"},gridcolor:"#e8edf5",linecolor:"#cbd5e1"},
-          legend:{...BASE.legend, x:1.02, xanchor:"left", y:1},
-        }} height={200}/>
-        <div style={{fontSize:"0.68rem",color:"#94a3b8",padding:"4px 8px",display:"flex",gap:16,flexWrap:"wrap"}}>
-          <span><span style={{color:"#2563eb"}}>━</span> P={P?.toFixed(3)}h</span>
-          <span><span style={{color:"#f59e0b"}}>┄</span> P/2, 2P</span>
+        <TierSection title="Tier 1 — Generalised Lomb-Scargle (GLS) · Multi-Band Lomb-Scargle (MBLS)" period={P}>
+          <LegendRow items={[
+            {color:"#1d4ed8",dash:"solid",label:"Multi-Band Lomb-Scargle (MBLS)"},
+            {color:"#0d9488",dash:"dash", label:"Generalised Lomb-Scargle (GLS, normalised)"},
+            ...sharedMarkerLegend,
+          ]}/>
+          <Plot traces={t1Traces} layout={{
+            ...BASE, margin:PLOT_MARGIN,
+            xaxis:{...xaxis},
+            yaxis:{title:{text:"Power"},gridcolor:"#e8edf5",linecolor:"#cbd5e1"},
+          }} height={200}/>
+          {glsPeak && <StatLine items={[{label:"GLS peak power",value:glsPeak}]}/>}
+        </TierSection>
 
-          <span><span style={{color:"#7c3aed"}}>┅</span> MHAOV</span>
-          <span><span style={{color:"#059669"}}>╌</span> GLS</span>
-          <span><span style={{color:"#0891b2"}}>━</span> CE</span>
-        </div>
+        <div style={S.divider}/>
+
+        <TierSection title="Tier 2 — Multi-Harmonic Analysis of Variance (MHAOV) · Multi-Band Lomb-Scargle (MBLS)" period={P}>
+          <LegendRow items={[
+            {color:"#ea580c",dash:"solid",label:"Multi-Band Lomb-Scargle (MBLS)"},
+            {color:"#9333ea",dash:"dot",  label:"Multi-Harmonic AoV (MHAOV, normalised)"},
+            ...sharedMarkerLegend,
+          ]}/>
+          <Plot traces={t2Traces} layout={{
+            ...BASE, margin:PLOT_MARGIN,
+            xaxis:{...xaxis},
+            yaxis:{title:{text:"Power"},gridcolor:"#e8edf5",linecolor:"#cbd5e1"},
+          }} height={200}/>
+          {pval!=null && d.r_code!==0 && (
+            <StatLine items={[{label:"MHAOV significance",value:`p = ${pval.toExponential(2)}`}]}/>
+          )}
+        </TierSection>
+
+        <div style={S.divider}/>
+
+        <TierSection title="Tier 3 — Conditional Entropy (CE) · Window Function" period={P}>
+          <LegendRow items={[
+            {color:"#0e7490",dash:"solid",label:"Conditional Entropy (CE, normalised)"},
+            {color:"#f59e0b",dash:"solid",label:"Window function (normalised)"},
+            ...sharedMarkerLegend,
+          ]}/>
+          <Plot traces={t3Traces} layout={{
+            ...BASE, margin:PLOT_MARGIN,
+            xaxis:{...xaxis},
+            yaxis:{title:{text:"Power / CE"},gridcolor:"#e8edf5",linecolor:"#cbd5e1"},
+          }} height={200}/>
+          {pg.ce_scores && (
+            <StatLine items={[{label:"CE minimum score",value:minCE.toFixed(4)}]}/>
+          )}
+        </TierSection>
       </>}
 
-      {tab==="fold" && d.fold && (
+      {/* ── Phase fold ── */}
+      {tab==="fold" && d.fold && <>
+        <LegendRow items={[
+          ...bands.map(b=>({color:BC[b],dash:"none",label:BAND_FULL[b]||b})),
+          {color:"#111827",dash:"solid",label:"Fitted model"},
+        ]}/>
         <div style={{display:"flex",flexDirection:"column",gap:0}}>
-          <Plot traces={foldTraces} layout={{...BASE,...makeMarginLayout(40,8,58,16),
+          <Plot traces={foldTraces} layout={{
+            ...BASE, margin:{...PLOT_MARGIN,b:8},
             title:{text:`Phase fold — 2 cycles  (P = ${P?.toFixed(4)} hr)`,font:{size:12,color:"#0f172a"}},
-            xaxis:{title:{text:""},range:[0,2],dtick:0.25,gridcolor:"#e8edf5",linecolor:"#cbd5e1",showticklabels:false},
-            yaxis:{title:{text:"Δmag (detrended)"},autorange:"reversed",gridcolor:"#e8edf5",linecolor:"#cbd5e1"},
+            xaxis:{title:{text:""},range:[0,2],dtick:0.25,
+              gridcolor:"#e8edf5",linecolor:"#cbd5e1",showticklabels:false},
+            yaxis:{title:{text:"Δmag (detrended)"},autorange:"reversed",
+              gridcolor:"#e8edf5",linecolor:"#cbd5e1"},
           }} height={260}/>
-          <Plot traces={residTraces} layout={{...BASE,...makeMarginLayout(8,48,58,16),
-            title:{text:"",font:{size:11}},
-            xaxis:{title:{text:"Phase"},range:[0,2],dtick:0.25,gridcolor:"#e8edf5",linecolor:"#cbd5e1"},
-            yaxis:{title:{text:"O−C (mag)"},zeroline:true,zerolinecolor:"#475569",gridcolor:"#e8edf5"},
+          <Plot traces={residTraces} layout={{
+            ...BASE, margin:{...PLOT_MARGIN,t:8},
+            xaxis:{title:{text:"Phase"},range:[0,2],dtick:0.25,
+              gridcolor:"#e8edf5",linecolor:"#cbd5e1"},
+            yaxis:{title:{text:"O−C (mag)"},zeroline:true,
+              zerolinecolor:"#475569",gridcolor:"#e8edf5"},
           }} height={150}/>
         </div>
-      )}
+      </>}
     </div>
   );
 }
