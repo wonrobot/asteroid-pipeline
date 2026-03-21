@@ -68,7 +68,7 @@ function PMarkers({P}) {
       fontSize:"0.65rem",fontFamily:"JetBrains Mono,monospace",color}}>
       <svg width="18" height="8" style={{flexShrink:0}}>
         <line x1="0" y1="4" x2="18" y2="4" stroke={color} strokeWidth="1.8"
-          strokeDasharray={color==="#111827"?"none":"3,2"}/>
+          strokeDasharray={color==="#1e3a5f"?"0":"3,2"}/>
       </svg>
       {label}
     </span>
@@ -195,8 +195,9 @@ export default function AsteroidCharts({provid}) {
   }):null;
 
   const mjd0 = Math.min(...d.obs.mjd);
+  const mjdToDate = mjd => new Date((mjd - 40587) * 86400000).toISOString();
   const lcT = bands.map(b=>({
-    x:d.obs.mjd.filter((_,i)=>d.obs.band[i]===b).map(m=>+((m-mjd0)*24).toFixed(2)),
+    x:d.obs.mjd.filter((_,i)=>d.obs.band[i]===b).map(mjdToDate),
     y:d.obs.mag.filter((_,i)=>d.obs.band[i]===b),
     error_y:{type:"data",array:d.obs.magerr.filter((_,i)=>d.obs.band[i]===b),
       visible:true,color:getBandColor(b)+"44",thickness:1},
@@ -304,7 +305,7 @@ export default function AsteroidCharts({provid}) {
         </Row>
         <PlotDiv traces={lcT} height={270} layout={{
           ...BASE,
-          xaxis:{...XY,title:{text:"Hours since first observation"}},
+          xaxis:{...XY,title:{text:"Date (UTC)"},type:"date",tickformat:"%b %d"},
           yaxis:{...XY,title:{text:"Magnitude"},autorange:"reversed"},
         }}/>
       </>}
