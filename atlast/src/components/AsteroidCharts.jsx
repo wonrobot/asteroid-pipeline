@@ -181,12 +181,12 @@ export default function AsteroidCharts({ provid }) {
   const minCE = pg.ce_scores ? Math.min(...pg.ce_scores) : 0;
   const ceDetected = pg.ce_scores && minCE < 0.95; // CE=1.0 means no detection
   const alias12in = 12 >= 0.3 && 12 <= 25;
-  const alias24in = 24 >= 0.3 && 24 <= 25;
+  const alias24in = 24 >= 0.3 && 24 <= 25; // line at 23.5 to avoid label cutoff
   const t3Traces = [
     ...(P?markers.map(m=>({...m,showlegend:false})):methodLines),
     // 12h/24h alias lines for T3 context
     ...(alias12in?[pline(12,"12h alias","#dc2626","dashdot",maxMBLS)]:[] ),
-    ...(alias24in?[pline(24,"24h alias","#dc2626","dashdot",maxMBLS)]:[] ),
+    ...(alias24in?[pline(23.5,"24h alias","#dc2626","dashdot",maxMBLS)]:[] ),
     ...(pg.window_periods&&pg.window_power ? [{
       x:pg.window_periods,
       y:pg.window_power.map(v=>v/Math.max(...pg.window_power)*maxMBLS*0.35),
@@ -267,7 +267,7 @@ export default function AsteroidCharts({ provid }) {
 
       {/* ── Periodogram ── */}
       {tab==="pgram" && <>
-        <TierSection title="Tier 1 — Fast Scan" period={P}>
+        <TierSection title="Tier 1: Fast Scan (GLS · MBLS)" period={P}>
           <LegendRow items={[
             {color:"#1d4ed8",label:"Multi-Band Lomb-Scargle (MBLS)"},
             {color:"#0d9488",label:"Generalised Lomb-Scargle (GLS, normalised)"},
@@ -277,12 +277,12 @@ export default function AsteroidCharts({ provid }) {
             xaxis:{...xaxis},
             yaxis:{title:{text:"Power"},gridcolor:"#e8edf5",linecolor:"#cbd5e1"},
           }} height={200}/>
-          {glsPeak && <StatLine items={[{label:"GLS peak power",value:glsPeak}]}/>}
+
         </TierSection>
 
         <div style={S.divider}/>
 
-        <TierSection title="Tier 2 — High-Order Methods" period={P}>
+        <TierSection title="Tier 2: High-Order Methods (MHAOV · MBLS)" period={P}>
           <LegendRow items={[
             {color:"#ea580c",label:"Multi-Band Lomb-Scargle (MBLS)"},
             {color:"#9333ea",label:"Multi-Harmonic Analysis of Variance (MHAOV, normalised)"},
@@ -293,13 +293,19 @@ export default function AsteroidCharts({ provid }) {
             yaxis:{title:{text:"Power"},gridcolor:"#e8edf5",linecolor:"#cbd5e1"},
           }} height={200}/>
           {pval!=null && d.r_code!==0 && (
-            <StatLine items={[{label:"MHAOV significance",value:`p = ${pval.toExponential(2)}`}]}/>
+            <StatLine items={[{
+              label:"Detection significance",
+              value: pval < 1e-10 ? `★★★ very high  (p = ${pval.toExponential(2)})` :
+                     pval < 0.001 ? `★★ significant  (p = ${pval.toExponential(2)})` :
+                     pval < 0.05  ? `★ marginal  (p = ${pval.toExponential(2)})` :
+                                    `not significant  (p = ${pval.toExponential(2)})`
+            }]}/>
           )}
         </TierSection>
 
         <div style={S.divider}/>
 
-        <TierSection title="Tier 3 — Conditional Entropy (CE) · Window Function" period={P}>
+        <TierSection title="Tier 3: Conditional Entropy (CE) · Window Function" period={P}>
           <LegendRow items={[
             ...(ceDetected?[{color:"#0e7490",label:"Conditional Entropy (CE, normalised)"}]:[]),
             {color:"#f59e0b",label:"Window function (normalised)"},
@@ -311,10 +317,10 @@ export default function AsteroidCharts({ provid }) {
             yaxis:{title:{text:"Power / CE"},gridcolor:"#e8edf5",linecolor:"#cbd5e1"},
           }} height={200}/>
           {pg.ce_scores && (
-            <StatLine items={ceDetected
-              ? [{label:"CE minimum score",value:minCE.toFixed(4)}]
-              : [{label:"Conditional Entropy",value:"no detection (CE ≈ 1.0 — period not constrained by this method)"}]
-            }/>
+            <StatLine items={[
+              ...(ceDetected ? [{label:"CE minimum",value:minCE.toFixed(4)}] : [{label:"CE",value:"no detection"}]),
+              {label:"Note",value:"window fn peaks at 12/24h reflect observing cadence"},
+            ]}/>
           )}
         </TierSection>
       </>}
