@@ -366,7 +366,7 @@ export default function App() {
   const detailRef = useRef(null)
 
   useEffect(() => {
-    fetch('/data/period_catalog_76.csv')
+    fetch('/data/catalog_92k.csv')
       .then(r => r.text())
       .then(text => {
         const { data } = Papa.parse(text, { header: true, skipEmptyLines: true })
