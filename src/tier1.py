@@ -114,11 +114,27 @@ def run_tier1(
                        f"SNR={data.snr:.2f} < threshold={cfg_t.snr_threshold}")
 
     # ── Period grid ───────────────────────────────────────────────────────────
-    # Tier 1 grid — two-pass strategy for speed
-    # Pass 1: coarse search from 0.5hr floor (2000 pts, always fast ~1s)
-    # Pass 2: only if coarse power is low (possible fast rotator hiding
-    #         below 0.5hr), expand to Nyquist floor and search again.
-    #         This catches MG56 (0.264hr), MM81 (1.1hr), etc.
+    # Tier 1 grid — two-pass strategy with window-qualified expansion
+    #
+    # Pass 1: coarse search from 0.5hr floor (2000 pts, always fast ~1s).
+    #         Window function computed on this coarse grid immediately after
+    #         so we can qualify the Pass 2 trigger.
+    #
+    # Pass 2: expand to Nyquist floor only when BOTH conditions hold:
+    #   (a) power is weak OR best period is near the 0.5hr boundary, AND
+    #   (b) the coarse best period is NOT window-contaminated
+    #
+    # Rationale for condition (b):
+    #   Low coarse power has two explanations:
+    #     i.  True period is below 0.5hr (fast rotator) — expansion helps.
+    #     ii. Coarse best period is a cadence alias; real signal is elsewhere
+    #         on the same grid — expansion wastes time and may find a spurious
+    #         sub-0.5hr alias peak instead.
+    #   We now distinguish these cases using the window function.
+    #   If the coarse best is contaminated, we keep the coarse grid and let
+    #   window-penalised peak selection (below) find the real signal.
+    #   This avoids unnecessary 20k-point grid expansions and prevents
+    #   cadence aliases from triggering fast-rotator searches.
     p_max_t1    = min(cfg_p.period_max_hr, data.baseline_hr)
     FAST_THRESH = 0.5  # hr
 
@@ -129,33 +145,51 @@ def run_tier1(
     best_coarse    = test_periods[np.argmax(gls_pow_coarse)]
     max_pow_coarse = float(gls_pow_coarse.max())
 
-    # Pass 2: expand to Nyquist floor if:
-    #   (a) coarse power is weak (true period may be below 0.5hr), OR
-    #   (b) best coarse period is near the 0.5hr boundary
-    #   AND the data actually supports sub-0.5hr detection
-    near_boundary  = best_coarse < FAST_THRESH * 1.5
-    weak_power     = max_pow_coarse < 0.15
+    # Window function on coarse grid — needed to qualify Pass 2 trigger
+    window_pow_coarse = compute_window_function(data.t_hrs, test_periods)
+    coarse_cont       = contamination_score(best_coarse, test_periods, window_pow_coarse)
+    coarse_contaminated = coarse_cont > CONTAMINATION_THRESHOLD
+
+    near_boundary   = best_coarse < FAST_THRESH * 1.5
+    weak_power      = max_pow_coarse < 0.15
     can_search_fast = data.period_min_hr < FAST_THRESH
-    if (near_boundary or weak_power) and can_search_fast:
+
+    # Pass 2 trigger: power condition fires AND coarse best is not a known alias
+    # near_boundary always expands — a period at 0.6hr could be 0.5hr P/2;
+    # this is a genuine harmonic concern unrelated to alias contamination.
+    should_expand = (near_boundary or (weak_power and not coarse_contaminated)) and can_search_fast
+
+    if coarse_contaminated and weak_power and not near_boundary:
+        logger.debug(
+            f"{data.provid}: Pass 2 suppressed — coarse best={best_coarse:.3f}hr "
+            f"is window-contaminated (cont={coarse_cont:.2f}); "
+            f"low power is likely alias suppression, not a fast rotator"
+        )
+
+    if should_expand:
         n_fast       = min(20_000, max(cfg_p.n_grid_coarse,
                            int(5 * data.baseline_hr
                                * (1.0/data.period_min_hr - 1.0/p_max_t1))))
         test_periods = np.linspace(data.period_min_hr, p_max_t1, n_fast)
-    # else: keep coarse test_periods — normal rotator, no expansion needed
+        logger.debug(
+            f"{data.provid}: Pass 2 expanded grid to {len(test_periods)} pts "
+            f"(near_boundary={near_boundary}, weak={weak_power}, "
+            f"coarse_cont={coarse_cont:.2f})"
+        )
+    # else: keep coarse test_periods — normal rotator or contaminated alias
 
     # ── GLS — uses merged, band-offset-corrected + detrended series ───────────
     gls_pow  = gls_periodogram(data.t_hrs, data.y_dt, data.dy, test_periods)
     gls_max  = float(gls_pow.max())
 
-    # ── Window function ───────────────────────────────────────────────────────
-    # Computed once on the final period grid. Peaks in the window function
-    # are cadence aliases — periods the sampling pattern can introduce as
-    # false peaks regardless of the true signal.
-    # This replaces the fixed alias list in reliability.py for the initial
-    # period selection step. Both checks run: fixed list catches the well-known
-    # daily/annual aliases; window function catches dataset-specific aliases
-    # (e.g. ~3-day gaps from LSST scheduling, moon avoidance windows, etc.).
-    window_pow = compute_window_function(data.t_hrs, test_periods)
+    # ── Window function on final grid ─────────────────────────────────────────
+    # If the grid was not expanded, test_periods == coarse grid and we already
+    # have window_pow_coarse — reuse it to avoid a redundant computation.
+    # If Pass 2 expanded the grid, recompute on the new (larger) grid.
+    if should_expand:
+        window_pow = compute_window_function(data.t_hrs, test_periods)
+    else:
+        window_pow = window_pow_coarse  # same grid, reuse
 
     # ── Window-penalised best GLS period ─────────────────────────────────────
     # Instead of raw argmax, use window_informed_peaks which applies a

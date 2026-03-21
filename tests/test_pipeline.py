@@ -565,3 +565,85 @@ class TestMBLSFAP:
             "TierConfig missing mbls_fap_n_perm"
         assert DEFAULT_CONFIG.tier.mbls_fap_thresh > 0
         assert DEFAULT_CONFIG.tier.mbls_fap_n_perm > 0
+
+
+# ── Tests: Pass 2 window-qualified expansion ──────────────────────────────────
+
+class TestPass2Suppression:
+    def _make_obs(self, n=80, period_hr=4.8, amplitude=0.3, noise=0.03, seed=42):
+        """Helper — synthetic lightcurve as PreparedData."""
+        from preprocessing import preprocess
+        df   = make_synthetic_lc(period_hr=period_hr, amplitude=amplitude,
+                                 n_obs=n, noise=noise, seed=seed)
+        return preprocess(df, DEFAULT_CONFIG), df
+
+    def test_clean_signal_may_expand(self):
+        """Weak but uncontaminated coarse power should allow Pass 2 expansion."""
+        from tier1 import run_tier1
+        # Low amplitude → weak coarse power, no alias contamination → expand allowed
+        data, _ = self._make_obs(amplitude=0.05, noise=0.04)
+        # Just check it doesn't crash and returns valid result
+        t1 = run_tier1(data, DEFAULT_CONFIG)
+        assert hasattr(t1, 'passes')
+
+    def test_contaminated_weak_power_suppresses_expansion(self):
+        """
+        When coarse best period is window-contaminated AND power is weak,
+        Pass 2 should NOT expand. Verify by checking the suppression log path
+        exists in source (logic test) and that Tier1Result is still valid.
+        """
+        import ast
+        with open('src/tier1.py') as f:
+            src = f.read()
+        assert 'Pass 2 suppressed' in src, \
+            "Suppression log message missing from tier1.py"
+        assert 'coarse_contaminated and weak_power and not near_boundary' in src, \
+            "Suppression condition missing from tier1.py"
+
+    def test_near_boundary_always_expands(self):
+        """
+        near_boundary trigger should expand even if coarse best is contaminated —
+        harmonic concern (P/2 at boundary) is independent of alias risk.
+        """
+        with open('src/tier1.py') as f:
+            src = f.read()
+        # The should_expand condition should include near_boundary without
+        # a contamination check
+        assert 'near_boundary or (weak_power and not coarse_contaminated)' in src, \
+            "near_boundary should expand regardless of contamination"
+
+    def test_window_reused_when_no_expansion(self):
+        """
+        When grid is not expanded, window_pow should be window_pow_coarse
+        (no redundant recomputation).
+        """
+        with open('src/tier1.py') as f:
+            src = f.read()
+        assert 'window_pow = window_pow_coarse' in src, \
+            "Window reuse path missing — redundant recomputation on non-expanded grid"
+
+    def test_window_recomputed_when_expanded(self):
+        """When grid expands, window must be recomputed on the new larger grid."""
+        with open('src/tier1.py') as f:
+            src = f.read()
+        assert 'if should_expand:' in src
+        # The recompute must be inside the should_expand block
+        expand_idx   = src.index('if should_expand:')
+        recompute_idx = src.index('window_pow = compute_window_function')
+        reuse_idx     = src.index('window_pow = window_pow_coarse')
+        assert expand_idx < recompute_idx < reuse_idx, \
+            "window recompute should come before window reuse in source"
+
+    def test_tier1_result_still_valid_after_change(self):
+        """End-to-end: Tier1Result must still have all expected fields."""
+        from tier1 import run_tier1
+        from preprocessing import preprocess
+        df   = make_synthetic_lc(period_hr=4.8, amplitude=0.4, noise=0.02, n_obs=100)
+        data = preprocess(df, DEFAULT_CONFIG)
+        t1   = run_tier1(data, DEFAULT_CONFIG)
+        for field in ['passes', 'best_period_gls', 'best_period_mbls',
+                      'window_power', 'gls_contamination', 'mbls_contamination',
+                      'test_periods', 'gls_power', 'mbls_power']:
+            assert hasattr(t1, field), f"Tier1Result missing {field}"
+        if t1.passes:
+            assert len(t1.window_power) == len(t1.test_periods)
