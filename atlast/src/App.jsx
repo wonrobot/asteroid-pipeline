@@ -428,6 +428,7 @@ export default function App() {
 
         {selected && (
           <div className="detail">
+{/* ── Header row ── */}
             <div className="detail-head">
               <div>
                 <div className="detail-id">{selected.provid}</div>
@@ -440,28 +441,105 @@ export default function App() {
               <button className="btn-close" onClick={() => setSelected(null)}>✕ close</button>
             </div>
 
-            <div className="detail-fields">
+            {/* ── Status cluster: R-code · reliability · regime ── */}
+            <div style={{display:'flex', gap:'8px', alignItems:'center', marginBottom:'12px', flexWrap:'wrap'}}>
+              <RBadge code={selected.r_code} />
+              {selected.reliability && (
+                <span style={{fontSize:'0.72rem', fontWeight:500, color: selected.reliability==='confirmed'?T.green:selected.reliability==='followup_needed'?T.red:T.amber,
+                  background: selected.reliability==='confirmed'?T.greenSoft:selected.reliability==='followup_needed'?T.redSoft:T.amberSoft,
+                  padding:'2px 8px', borderRadius:4}}>
+                  {selected.reliability.replace('_',' ')}
+                </span>
+              )}
+              {selected.regime && (
+                <span style={{fontSize:'0.72rem', color:T.textDim, background:T.bg, border:`1px solid ${T.border}`, padding:'2px 8px', borderRadius:4}}>
+                  {selected.regime}
+                </span>
+              )}
+              {/* Spin barrier warning */}
+              {selected.final_period_hr && parseFloat(selected.final_period_hr) < 2.2 && (
+                <span style={{fontSize:'0.72rem', fontWeight:600, color:'#dc2626', background:'#fee2e2',
+                  border:'1px solid #fca5a5', padding:'2px 10px', borderRadius:4, marginLeft:'auto'}}>
+                  ⚡ Superfast rotator — P &lt; 2.2 hr spin barrier
+                </span>
+              )}
+              {selected.final_period_hr && parseFloat(selected.final_period_hr) < 0.5 && (
+                <span style={{fontSize:'0.72rem', fontWeight:600, color:'#7c3aed', background:'#ede9fe',
+                  border:'1px solid #c4b5fd', padding:'2px 10px', borderRadius:4}}>
+                  ⚡ Ultra-fast (cf. Greenstreet et al. 2026)
+                </span>
+              )}
+            </div>
+
+            {/* ── Detection cluster ── */}
+            <div className="detail-fields" style={{gridTemplateColumns:'repeat(auto-fill, minmax(130px,1fr))'}}>
               {[
-                ['R-code',      <RBadge code={selected.r_code} />],
-                ['Reliability', selected.reliability || '—'],
-                ['Regime',      selected.regime || '—'],
-                ['N obs',       selected.t1_n_obs || '—'],
-                ['Amplitude',   selected.t2_amplitude_mag ? `${parseFloat(selected.t2_amplitude_mag).toFixed(3)} mag` : '—'],
-                ['SNR',         selected.t1_snr ? parseFloat(selected.t1_snr).toFixed(1) : '—'],
-                ['Baseline',    selected.baseline_hr ? `${parseFloat(selected.baseline_hr).toFixed(0)} hr` : '—'],
-                ['Alias risk',  selected.alias_risk || '—'],
-                ['N nights',    selected.n_nights || '—'],
-                ['Bands',       selected.bands_used || '—'],
-                ['p-value',     selected.t2_p_value ? parseFloat(selected.t2_p_value).toExponential(2) : '—'],
-              ].map(([l, v]) => (
-                <div className="df" key={l}>
-                  <span className="df-l">{l}</span>
-                  <span className="df-v">{v}</span>
-                </div>
+                ['Period (hr)',   selected.final_period_hr ? parseFloat(selected.final_period_hr).toFixed(4) : '—'],
+                ['Amplitude',    selected.t2_amplitude_mag ? `${parseFloat(selected.t2_amplitude_mag).toFixed(3)} mag` : '—'],
+                ['SNR',          selected.t1_snr ? parseFloat(selected.t1_snr).toFixed(1) : '—'],
+                ['p-value',      selected.t2_p_value ? parseFloat(selected.t2_p_value).toExponential(2) : '—'],
+              ].map(([l,v]) => (
+                <div className="df" key={l}><span className="df-l">{l}</span><span className="df-v">{v}</span></div>
               ))}
             </div>
 
+            {/* ── Observation cluster ── */}
+            <div style={{display:'flex', gap:'6px', flexWrap:'wrap', margin:'10px 0', alignItems:'center'}}>
+              <span style={{fontSize:'0.62rem', textTransform:'uppercase', letterSpacing:'0.08em', color:T.textDim, fontWeight:600, marginRight:4}}>Observations</span>
+              {[
+                [selected.t1_n_obs, 'obs'],
+                [selected.n_nights, 'nights'],
+                [selected.baseline_hr ? `${(parseFloat(selected.baseline_hr)/24).toFixed(1)}d` : null, 'baseline'],
+                [selected.alias_risk, 'alias risk'],
+              ].filter(([v])=>v).map(([v,l])=>(
+                <span key={l} style={{fontSize:'0.75rem', fontFamily:"'JetBrains Mono',monospace", color:T.textPri,
+                  background:T.bg, border:`1px solid ${T.border}`, borderRadius:4, padding:'2px 8px'}}>
+                  <strong>{v}</strong> <span style={{color:T.textDim,fontSize:'0.68rem'}}>{l}</span>
+                </span>
+              ))}
+            </div>
+
+            {/* ── LCDB comparison ── */}
+            {selected.lcdb_period_hr && (
+              <div style={{fontSize:'0.75rem', padding:'6px 10px', background:'#f0fdf4', border:'1px solid #bbf7d0',
+                borderRadius:5, marginBottom:'10px', display:'flex', gap:12, flexWrap:'wrap', alignItems:'center'}}>
+                <span style={{fontWeight:600, color:T.green}}>LCDB match</span>
+                <span style={{fontFamily:"'JetBrains Mono',monospace"}}>Published: {parseFloat(selected.lcdb_period_hr).toFixed(4)} hr</span>
+                {selected.lcdb_delta_pct && (
+                  <span style={{color: Math.abs(parseFloat(selected.lcdb_delta_pct))<10?T.green:T.red}}>
+                    Δ = {parseFloat(selected.lcdb_delta_pct).toFixed(1)}%
+                  </span>
+                )}
+                {selected.lcdb_u_code && <span style={{color:T.textDim}}>U={selected.lcdb_u_code}</span>}
+              </div>
+            )}
+
+            {/* ── Method agreement chips ── */}
+            {(selected.t2_mhaov_period_hr || selected.t2_mbls_period_hr || selected.t2_ce_period_hr) && (
+              <div style={{display:'flex', gap:6, flexWrap:'wrap', marginBottom:'10px', alignItems:'center'}}>
+                <span style={{fontSize:'0.62rem', textTransform:'uppercase', letterSpacing:'0.08em', color:T.textDim, fontWeight:600, marginRight:4}}>Methods</span>
+                {[
+                  ['MHAOV', selected.t2_mhaov_period_hr],
+                  ['MBLS',  selected.t2_mbls_period_hr],
+                  ['CE',    selected.t2_ce_period_hr],
+                ].filter(([,v])=>v).map(([name,val])=>(
+                  <span key={name} style={{fontSize:'0.7rem', fontFamily:"'JetBrains Mono',monospace",
+                    background:T.accentSoft, color:T.accent, border:`1px solid ${T.border}`,
+                    borderRadius:4, padding:'2px 8px'}}>
+                    {name} {parseFloat(val).toFixed(3)}h
+                  </span>
+                ))}
+              </div>
+            )}
+
+            {/* ── Science note ── */}
             <div className="detail-note">{scienceNote(selected)}</div>
+            {selected.reliability_notes && selected.reliability_notes !== 'nan' && (
+              <div style={{fontSize:'0.75rem', color:T.textSec, marginTop:6, padding:'6px 10px',
+                background:T.bg, border:`1px solid ${T.border}`, borderRadius:4, lineHeight:1.5}}>
+                📋 {selected.reliability_notes}
+              </div>
+            )}
 
             <AsteroidCharts provid={selected.provid} />
           </div>
