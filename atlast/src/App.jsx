@@ -567,7 +567,7 @@ export default function App() {
             <span key={r} title={desc} style={{ cursor: 'help' }}><RBadge code={r} /></span>
           ))}
           <span style={{ fontSize: '0.65rem', color: T.textDim, marginLeft: 4 }}>hover for meaning</span>
-        </div>
+        </div>}
 
         {page === "catalog" && <div className="controls">
           <div className="filter-grp">
