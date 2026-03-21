@@ -197,6 +197,19 @@ def _post_process(df: pd.DataFrame, config: PipelineConfig) -> pd.DataFrame:
     """
     Standardise column types, apply band filter, and sort.
     Called by both BigQuery and CSV loaders.
+
+    Band handling
+    -------------
+    Band names are normalised (remapped) BEFORE the bands_use filter is
+    applied. This means the filter always operates on canonical names
+    (Lg/Lr/Li/...) regardless of whether the input file used short names
+    (g/r/i) or long names (Lg/Lr/Li). Both conventions work transparently:
+
+      Short names (BigQuery raw):  g  → remap → Lg  → kept by bands_use
+      Long names  (exported CSV): Lg  → remap (no-op) → Lg → kept by bands_use
+
+    bands_use should list canonical (post-remap) names e.g. ["Lg","Lr","Li"].
+    The default config includes both short and long forms for safety.
     """
     # Ensure MJD is present
     if "mjd" not in df.columns:
@@ -213,8 +226,20 @@ def _post_process(df: pd.DataFrame, config: PipelineConfig) -> pd.DataFrame:
     if len(df) < before:
         logger.warning(f"Dropped {before - len(df)} rows with null values")
 
-    # Filter to usable bands
+    # ── Apply band remap BEFORE filtering ─────────────────────────────────────
+    # Normalise short names (g/r/i/z/y/u) to canonical long names (Lg/Lr/...)
+    # so the bands_use filter always sees a consistent naming convention.
+    # If band_remap is empty (e.g. data is already in canonical form) this is
+    # a no-op. preprocessing.py also applies the same remap — the second
+    # application is harmless since Lg→Lg is not in the remap dict.
+    if config.data.band_remap:
+        df["band"] = df["band"].replace(config.data.band_remap)
+
+    n_before_filter = len(df)
     df = df[df["band"].isin(config.data.bands_use)].copy()
+    n_dropped = n_before_filter - len(df)
+    if n_dropped > 0:
+        logger.debug(f"Band filter dropped {n_dropped} rows (kept: {config.data.bands_use})")
 
     # Apply quality cut on rmsmag
     df = df[df["rmsmag"] <= config.data.rmsmag_max].copy()

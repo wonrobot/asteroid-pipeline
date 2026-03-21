@@ -24,10 +24,17 @@ class DataConfig:
     def bq_table_full(self) -> str:
         return f"{self.bq_project}.{self.bq_dataset}.{self.bq_table}"
 
-    # Which bands to use (u excluded by default — too few observations)
-    bands_use: List[str] = field(default_factory=lambda: ["g", "r", "i"])
+    # Which bands to use (u/Lu excluded by default — too few observations).
+    # Uses canonical long-form names (Lg/Lr/Li) which is what the band_remap
+    # below produces. Short names (g/r/i) are remapped before this filter
+    # runs, so both naming conventions in source data work transparently.
+    bands_use: List[str] = field(default_factory=lambda: ["Lg", "Lr", "Li"])
 
-    # Band remapping applied after loading (matches LSST pipeline convention)
+    # Band remapping: normalises short LSST filter names to canonical long form.
+    # Applied in ingestion._post_process BEFORE the bands_use filter, so data
+    # files using either convention (g/r/i or Lg/Lr/Li) are handled correctly.
+    # Lg=g, Lr=r, Li=i, Lu=u, Lz=z, Ly=y — same physical filter, two naming
+    # conventions used by different parts of the Rubin/LSST stack.
     band_remap: dict = field(default_factory=lambda: {
         "g": "Lg", "r": "Lr", "i": "Li", "u": "Lu", "y": "Ly", "z": "Lz"
     })

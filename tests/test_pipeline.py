@@ -752,3 +752,86 @@ class TestMBLSBandSupport:
         assert 'mbls_band_support_frac >= 0.67' in src
         assert 'both_sig' in src
         assert 'regime not in ("sparse", "unknown")' in src
+
+
+# ── Tests: Band naming convention (Lg/g equivalence) ─────────────────────────
+
+class TestBandNaming:
+    """
+    Lg=g, Lr=r, Li=i, Lu=u, Lz=z, Ly=y — same physical filter, two naming
+    conventions used by different parts of the Rubin/LSST stack.
+    ingestion._post_process must handle both transparently.
+    """
+
+    def _make_df(self, band_style="short"):
+        """Make a minimal observations DataFrame in short (g/r/i) or long (Lg/Lr/Li) form."""
+        rng = np.random.default_rng(0)
+        n   = 60
+        if band_style == "short":
+            bands = rng.choice(["g", "r", "i"], n)
+        else:
+            bands = rng.choice(["Lg", "Lr", "Li"], n)
+        return pd.DataFrame({
+            "provid":  ["TEST"] * n,
+            "mjd":     np.sort(rng.uniform(60000, 60010, n)),
+            "band":    bands,
+            "mag":     22.0 + rng.normal(0, 0.1, n),
+            "rmsmag":  np.full(n, 0.05),
+        })
+
+    def test_short_band_names_pass_filter(self):
+        """Data with short names (g/r/i) must survive _post_process."""
+        from ingestion import _post_process
+        df  = self._make_df("short")
+        out = _post_process(df, DEFAULT_CONFIG)
+        assert len(out) > 0, "All rows dropped for short band names g/r/i"
+        assert set(out["band"].unique()).issubset({"Lg","Lr","Li"}), \
+            "Short names not remapped to canonical form"
+
+    def test_long_band_names_pass_filter(self):
+        """Data with long names (Lg/Lr/Li) must survive _post_process."""
+        from ingestion import _post_process
+        df  = self._make_df("long")
+        out = _post_process(df, DEFAULT_CONFIG)
+        assert len(out) > 0, "All rows dropped for long band names Lg/Lr/Li"
+        assert set(out["band"].unique()).issubset({"Lg","Lr","Li"}), \
+            "Long names changed unexpectedly"
+
+    def test_short_and_long_give_same_result(self):
+        """Short and long band name datasets with identical obs should yield same rows."""
+        from ingestion import _post_process
+        rng = np.random.default_rng(1)
+        n   = 60
+        mjds = np.sort(rng.uniform(60000, 60010, n))
+        mags = 22.0 + rng.normal(0, 0.1, n)
+        errs = np.full(n, 0.05)
+        # Same data, different band naming
+        band_short = rng.choice(["g","r","i"], n)
+        band_long  = np.array(["L"+b for b in band_short])
+
+        df_short = pd.DataFrame({"provid":"T","mjd":mjds,"band":band_short,"mag":mags,"rmsmag":errs})
+        df_long  = pd.DataFrame({"provid":"T","mjd":mjds,"band":band_long, "mag":mags,"rmsmag":errs})
+
+        out_short = _post_process(df_short, DEFAULT_CONFIG)
+        out_long  = _post_process(df_long,  DEFAULT_CONFIG)
+
+        assert len(out_short) == len(out_long), \
+            f"Short ({len(out_short)}) and long ({len(out_long)}) gave different row counts"
+        assert list(out_short["band"]) == list(out_long["band"]), \
+            "Band columns differ between short and long naming"
+
+    def test_remap_applied_before_filter(self):
+        """Remap must happen before bands_use filter — verify in source."""
+        with open("src/ingestion.py") as f:
+            src = f.read()
+        remap_idx  = src.index('df["band"] = df["band"].replace(config.data.band_remap)')
+        filter_idx = src.index('df = df[df["band"].isin(config.data.bands_use)]')
+        assert remap_idx < filter_idx, \
+            "Band remap must happen BEFORE the bands_use filter in _post_process"
+
+    def test_default_bands_use_canonical(self):
+        """Default bands_use must use canonical Lg/Lr/Li names."""
+        from config import DEFAULT_CONFIG
+        for b in DEFAULT_CONFIG.data.bands_use:
+            assert b.startswith("L") or len(b) > 1, \
+                f"bands_use default contains non-canonical name: {b}"
