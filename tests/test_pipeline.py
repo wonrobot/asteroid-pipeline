@@ -433,3 +433,135 @@ class TestWindowAlias:
             "CATALOG_COLUMNS missing window_alias_risk"
         assert 'window_alias_note' in CATALOG_COLUMNS, \
             "CATALOG_COLUMNS missing window_alias_note"
+
+
+# ── Tests: MBLS false alarm probability ──────────────────────────────────────
+
+class TestMBLSFAP:
+    def test_fap_range(self):
+        """FAP must be in [0, 1]."""
+        from tier2 import compute_mbls_fap
+        df   = make_synthetic_lc(period_hr=4.8, amplitude=0.4, noise=0.02, n_obs=100)
+        from preprocessing import preprocess
+        data = preprocess(df, DEFAULT_CONFIG)
+        periods = np.linspace(0.5, 12, 500)
+        from tier1 import mbls_periodogram
+        obs_pow = mbls_periodogram(
+            data.t_hrs, data.y_multiband, data.dy, data.bands, periods, nterms=2
+        )
+        fap = compute_mbls_fap(
+            data.t_hrs, data.y_multiband, data.dy, data.bands,
+            test_periods=periods,
+            observed_max_power=float(obs_pow.max()),
+            n_perm=50,   # fast for testing
+            nterms=2,
+        )
+        assert 0.0 <= fap <= 1.0, f"FAP={fap} out of [0,1]"
+
+    def test_fap_low_for_strong_signal(self):
+        """High-SNR synthetic signal should give a low FAP."""
+        from tier2 import compute_mbls_fap
+        from preprocessing import preprocess
+        from tier1 import mbls_periodogram
+        df   = make_synthetic_lc(period_hr=4.8, amplitude=0.6, noise=0.01, n_obs=150)
+        data = preprocess(df, DEFAULT_CONFIG)
+        periods = np.linspace(0.5, 12, 500)
+        obs_pow = mbls_periodogram(
+            data.t_hrs, data.y_multiband, data.dy, data.bands, periods, nterms=2
+        )
+        fap = compute_mbls_fap(
+            data.t_hrs, data.y_multiband, data.dy, data.bands,
+            test_periods=periods,
+            observed_max_power=float(obs_pow.max()),
+            n_perm=100,
+            nterms=2,
+            seed=0,
+        )
+        assert fap < 0.05, f"Strong signal gave FAP={fap:.4f}, expected < 0.05"
+
+    def test_fap_high_for_noise(self):
+        """Pure noise should give a FAP near 1.0 (signal not significant)."""
+        from tier2 import compute_mbls_fap
+        from preprocessing import preprocess
+        from tier1 import mbls_periodogram
+        rng = np.random.default_rng(99)
+        n   = 100
+        df_noise = pd.DataFrame({
+            "provid":  ["NOISE"] * n,
+            "mjd":     np.sort(rng.uniform(60000, 60010, n)),
+            "band":    rng.choice(["g", "r", "i"], n),
+            "mag":     22.0 + rng.normal(0, 0.05, n),
+            "rmsmag":  np.full(n, 0.05),
+        })
+        data = preprocess(df_noise, DEFAULT_CONFIG)
+        periods = np.linspace(0.5, 12, 500)
+        obs_pow = mbls_periodogram(
+            data.t_hrs, data.y_multiband, data.dy, data.bands, periods, nterms=2
+        )
+        fap = compute_mbls_fap(
+            data.t_hrs, data.y_multiband, data.dy, data.bands,
+            test_periods=periods,
+            observed_max_power=float(obs_pow.max()),
+            n_perm=100,
+            nterms=2,
+            seed=0,
+        )
+        assert fap > 0.05, f"Noise gave FAP={fap:.4f}, expected > 0.05"
+
+    def test_tier2_result_has_fap_fields(self):
+        """Tier2Result must carry mbls_fap, mbls_sig, mhaov_sig, both_sig."""
+        from tier1 import run_tier1
+        from tier2 import run_tier2
+        from preprocessing import preprocess
+        df   = make_synthetic_lc(period_hr=4.8, amplitude=0.4, noise=0.02, n_obs=120)
+        data = preprocess(df, DEFAULT_CONFIG)
+        t1   = run_tier1(data, DEFAULT_CONFIG)
+        if not t1.passes:
+            pytest.skip("Tier 1 rejected")
+        t2 = run_tier2(data, t1, DEFAULT_CONFIG)
+        for field in ['mbls_fap', 'mbls_sig', 'mhaov_sig', 'both_sig']:
+            assert hasattr(t2, field), f"Tier2Result missing {field}"
+        assert 0.0 <= t2.mbls_fap <= 1.0, f"mbls_fap={t2.mbls_fap} out of [0,1]"
+        assert isinstance(t2.mbls_sig,  bool), "mbls_sig not bool"
+        assert isinstance(t2.mhaov_sig, bool), "mhaov_sig not bool"
+        assert isinstance(t2.both_sig,  bool), "both_sig not bool"
+        # both_sig must be consistent with the individual flags
+        assert t2.both_sig == (t2.mbls_sig and t2.mhaov_sig), \
+            "both_sig inconsistent with mbls_sig and mhaov_sig"
+
+    def test_both_sig_feeds_reliability(self):
+        """Reliability notes should mention MBLS FAP when both gates are used."""
+        from tier1 import run_tier1
+        from tier2 import run_tier2
+        from reliability import compute_reliability
+        from characterise import characterise
+        from preprocessing import preprocess
+        df   = make_synthetic_lc(period_hr=4.8, amplitude=0.5, noise=0.01, n_obs=150)
+        data = preprocess(df, DEFAULT_CONFIG)
+        char = characterise(df)
+        t1   = run_tier1(data, DEFAULT_CONFIG)
+        if not t1.passes:
+            pytest.skip("Tier 1 rejected")
+        t2 = run_tier2(data, t1, DEFAULT_CONFIG)
+        if not t2.passes:
+            pytest.skip("Tier 2 rejected or to Tier 3")
+        rel = compute_reliability(char, t1, t2)
+        # FAP value should appear in the reliability notes
+        assert "FAP" in rel.notes or "fap" in rel.notes.lower(), \
+            f"Reliability notes don't mention FAP: {rel.notes}"
+
+    def test_catalog_has_mbls_fap_column(self):
+        """CATALOG_COLUMNS must include t2_mbls_fap."""
+        from catalog import CATALOG_COLUMNS
+        assert "t2_mbls_fap" in CATALOG_COLUMNS, \
+            "CATALOG_COLUMNS missing t2_mbls_fap"
+
+    def test_config_has_fap_params(self):
+        """TierConfig must expose mbls_fap_thresh and mbls_fap_n_perm."""
+        from config import DEFAULT_CONFIG
+        assert hasattr(DEFAULT_CONFIG.tier, 'mbls_fap_thresh'), \
+            "TierConfig missing mbls_fap_thresh"
+        assert hasattr(DEFAULT_CONFIG.tier, 'mbls_fap_n_perm'), \
+            "TierConfig missing mbls_fap_n_perm"
+        assert DEFAULT_CONFIG.tier.mbls_fap_thresh > 0
+        assert DEFAULT_CONFIG.tier.mbls_fap_n_perm > 0

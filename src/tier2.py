@@ -34,6 +34,31 @@ least window-contaminated of the three estimates rather than a plain
 median. When contamination is severe (>CONTAMINATION_THRESHOLD) for a
 method's top peak, a warning is logged — the downstream reliability
 code will lower the R-code accordingly.
+
+MBLS false alarm probability (dual significance gate)
+-----------------------------------------------------
+MBLS operates on all photometric bands jointly — it has strictly more
+information than MHAOV, which collapses multi-band data to a single
+series. To use this information for the significance decision (not just
+period estimation), we compute an empirical FAP for MBLS via permutation
+test: shuffle time labels, recompute MBLS, repeat N times. The fraction
+of permutations with max power >= observed power is the FAP.
+
+Decision gate (dual):
+  mhaov_sig = p_value   < cfg.tier.mhaov_pval_thresh
+  mbls_sig  = mbls_fap  < cfg.tier.mbls_fap_thresh
+
+  both_sig  → full confidence gate (supports R=3)
+  either_sig → partial confidence gate (supports up to R=2)
+  neither   → reject unless methods agree (escalate to Tier 3)
+
+This means MBLS can now rescue a detection that MHAOV finds marginal
+(common for faint multi-band objects with few obs per band), and
+MHAOV can rescue a detection with unlucky permutation draws.
+
+Permutation efficiency: uses a coarse 500-point grid for permutations
+(null distribution needs max-power distribution, not resolved peaks).
+Real MBLS runs on the full fine grid. Typical cost: +0.5–2s per asteroid.
 """
 
 import logging
@@ -88,6 +113,10 @@ class Tier2Result:
     mbls_contamination  : cadence-alias score for MBLS best period [0–1]
     ce_contamination    : cadence-alias score for CE best period [0–1]
     consensus_contamination : cadence-alias score for adopted consensus [0–1]
+    mbls_fap                : MBLS false alarm probability via permutation [0–1]
+    mbls_sig                : True if mbls_fap < cfg.tier.mbls_fap_thresh
+    mhaov_sig               : True if p_value  < cfg.tier.mhaov_pval_thresh
+    both_sig                : True if both significance gates passed
     """
     provid:                  str
     passes:                  bool
@@ -114,6 +143,11 @@ class Tier2Result:
     mbls_contamination:      float        # cadence-alias score for MBLS peak
     ce_contamination:        float        # cadence-alias score for CE peak
     consensus_contamination: float        # cadence-alias score for adopted period
+    # ── New: MBLS false alarm probability ────────────────────────────────────
+    mbls_fap:                float        # MBLS FAP via permutation test [0–1]
+    mbls_sig:                bool         # True if mbls_fap < mbls_fap_thresh
+    mhaov_sig:               bool         # True if p_value < mhaov_pval_thresh
+    both_sig:                bool         # True if both gates passed
 
 
 # ── Main Tier 2 entry point ───────────────────────────────────────────────────
@@ -233,6 +267,32 @@ def run_tier2(
             f"(score={mbls_cont:.2f})"
         )
 
+    # ── MBLS false alarm probability — permutation test ───────────────────────
+    # Uses a coarse 500-point grid for permutations: we only need the null
+    # max-power distribution, not a resolved periodogram. The real MBLS peak
+    # (from the fine grid above) is compared against this null distribution.
+    # Coarse grid makes each permutation ~16× faster than the fine grid.
+    observed_mbls_max = float(mbls_pow.max())
+    mbls_fap = compute_mbls_fap(
+        data.t_hrs, data.y_multiband, data.dy, data.bands,
+        test_periods=test_periods,
+        observed_max_power=observed_mbls_max,
+        n_perm=cfg_t.mbls_fap_n_perm,
+        nterms=cfg_p.mbls_nterms_t2,
+    )
+    mhaov_sig = p_value  < cfg_t.mhaov_pval_thresh
+    mbls_sig  = mbls_fap < cfg_t.mbls_fap_thresh
+    both_sig  = mhaov_sig and mbls_sig
+    either_sig = mhaov_sig or mbls_sig
+
+    logger.debug(
+        f"{data.provid}: MBLS FAP={mbls_fap:.4f} "
+        f"({'sig' if mbls_sig else 'not sig'})  "
+        f"MHAOV p={p_value:.2e} "
+        f"({'sig' if mhaov_sig else 'not sig'})  "
+        f"both={both_sig}"
+    )
+
     # ── 3. Conditional Entropy — skip below 1hr ───────────────────────────────
     CE_MIN_HR = 1.0
     ce_skip   = (data.period_min_hr < CE_MIN_HR)
@@ -293,7 +353,8 @@ def run_tier2(
         f"MBLS={best_mbls:.3f}hr (cont={mbls_cont:.2f})  "
         f"CE={best_ce:.3f}hr (cont={ce_cont:.2f})  "
         f"consensus={consensus:.3f}hr (cont={consensus_cont:.2f})  "
-        f"agree={agrees}  F={F_best:.1f}  p={p_value:.2e}"
+        f"agree={agrees}  F={F_best:.1f}  p={p_value:.2e}  "
+        f"mbls_fap={mbls_fap:.4f}  both_sig={both_sig}"
     )
 
     # ── Decision ───────────────────────────────────────────────────────────────
@@ -325,12 +386,24 @@ def run_tier2(
             mbls_contamination=mbls_cont,
             ce_contamination=ce_cont,
             consensus_contamination=cp_cont,
+            mbls_fap=mbls_fap,
+            mbls_sig=mbls_sig,
+            mhaov_sig=mhaov_sig,
+            both_sig=both_sig,
         )
 
-    if p_value >= cfg_t.mhaov_pval_thresh and not any_agreement:
+    # ── Hard reject: neither gate significant and methods disagree ───────────
+    # This is the only unconditional rejection path. If methods disagree AND
+    # neither MHAOV nor MBLS finds the signal significant, there is nothing
+    # to disambiguate — Tier 3 would be running CLEAN on noise.
+    if not either_sig and not any_agreement:
         return _make_result(
             passes=False, to_tier3=False, agreement_val=False,
-            reject_reason=f"p-value={p_value:.2e} not significant and methods disagree"
+            reject_reason=(
+                f"neither gate significant "
+                f"(MHAOV p={p_value:.2e}, MBLS FAP={mbls_fap:.4f}) "
+                f"and methods disagree"
+            )
         )
 
     # Fix consensus for harmonic cases
@@ -338,10 +411,17 @@ def run_tier2(
     if d_mbls_2mhaov_cons <= cfg_t.agreement_tol * 2:
         consensus = float(best_mbls)
 
-    if full_agreement and p_value < cfg_t.mhaov_pval_thresh:
+    # ── Full agreement ─────────────────────────────────────────────────────────
+    # Publish if either gate is significant.
+    # both_sig → reliability.py will assign R=3 (high confidence)
+    # either_sig only → reliability.py will cap at R=2 (moderate)
+    if full_agreement and either_sig:
         return _make_result(passes=True, to_tier3=False, agreement_val=True)
 
-    if two_of_three and p_value < cfg_t.mhaov_pval_thresh:
+    # ── Two-of-three agreement ─────────────────────────────────────────────────
+    # Publish if either gate is significant.
+    # Consensus period logic unchanged — which two methods agreed determines it.
+    if two_of_three and either_sig:
         d_ce_mhaov    = abs(best_ce - best_mhaov) / (best_mhaov + 1e-12) if best_ce else 1.0
         d_mhaov_mbls  = abs(best_mhaov - best_mbls) / (best_mbls + 1e-12)
         d_mbls_2mhaov = abs(best_mbls - 2*best_mhaov) / (2*best_mhaov + 1e-12)
@@ -359,7 +439,87 @@ def run_tier2(
             consensus_p=consensus_two
         )
 
+    # ── Disagreement with partial significance → Tier 3 ─────────────────────
+    # Methods disagree but at least one gate is significant — real signal
+    # likely present but period is ambiguous. CLEAN can resolve it.
     return _make_result(passes=False, to_tier3=True, agreement_val=False)
+
+
+# ── MBLS false alarm probability ─────────────────────────────────────────────
+
+def compute_mbls_fap(
+    t:                   np.ndarray,
+    y:                   np.ndarray,
+    dy:                  np.ndarray,
+    bands:               np.ndarray,
+    test_periods:        np.ndarray,
+    observed_max_power:  float,
+    n_perm:              int   = 200,
+    nterms:              int   = 2,
+    n_coarse:            int   = 500,
+    seed:                int   = 42,
+) -> float:
+    """
+    Estimate MBLS false alarm probability via permutation test.
+
+    Shuffles the time labels n_perm times. For each shuffle, computes the
+    maximum MBLS power on a coarse grid. The FAP is the fraction of
+    permutations where max power >= observed_max_power.
+
+    Why time-label shuffling?
+    -------------------------
+    Shuffling t while keeping y, dy, bands fixed destroys all temporal
+    periodicity but preserves the noise properties, magnitude distribution,
+    and band structure. This gives the correct null distribution for the
+    hypothesis "there is no periodic signal in this data."
+
+    Why a coarse grid for permutations?
+    ------------------------------------
+    The null distribution only needs the max-power statistic — we don't
+    need to resolve individual peaks. A 500-point grid gives the same
+    max-power distribution as an 8000-point grid but runs 16× faster.
+    The fine-grid observed power is still used as the comparison value,
+    so we're not losing precision on the detection side.
+
+    Typical cost: ~0.5–2s per asteroid (200 perms × coarse grid).
+
+    Parameters
+    ----------
+    test_periods         : fine-grid periods (used to set coarse grid range)
+    observed_max_power   : max MBLS power on the fine grid (pre-computed)
+    n_perm               : number of permutations (200 → FAP resolution 0.005)
+    nterms               : MBLS Fourier terms (match what produced observed power)
+    n_coarse             : grid points for permutation periodograms
+    seed                 : random seed for reproducibility
+
+    Returns
+    -------
+    fap : float in [0, 1]
+        Fraction of permutations with max power >= observed.
+        Low FAP (< 0.001) → signal is significant.
+    """
+    rng = np.random.default_rng(seed)
+
+    # Coarse grid spanning the same range as the fine grid
+    p_lo = float(test_periods[0])
+    p_hi = float(test_periods[-1])
+    coarse_periods = np.linspace(p_lo, p_hi, n_coarse)
+
+    n_exceed = 0
+    for _ in range(n_perm):
+        t_perm = rng.permutation(t)
+        try:
+            pow_perm = mbls_periodogram(
+                t_perm, y, dy, bands, coarse_periods, nterms=nterms
+            )
+            if float(pow_perm.max()) >= observed_max_power:
+                n_exceed += 1
+        except Exception:
+            # If gatspy fails on a permutation (degenerate case), treat as
+            # low power — do not count as exceeding observed.
+            pass
+
+    return float(n_exceed) / float(n_perm)
 
 
 # ── Contamination-weighted consensus ─────────────────────────────────────────

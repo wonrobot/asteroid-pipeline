@@ -239,8 +239,9 @@ def compute_reliability(
         n_obs               = char.n_obs,
         n_nights            = char.n_nights,
         mbls_raw            = mbls_raw,
-        # Pass through Tier 2 contamination scores for additional context
         consensus_contamination = getattr(t2result, 'consensus_contamination', np.nan),
+        both_sig            = getattr(t2result, 'both_sig', False),
+        mbls_fap            = getattr(t2result, 'mbls_fap', np.nan),
     )
 
     # ── Build r_flag string ───────────────────────────────────────────────────
@@ -284,6 +285,8 @@ def _compute_r_code(
     t3_peak_ratio, alias_risk, alias_note, adopted_period,
     n_obs, n_nights, mbls_raw=None,
     consensus_contamination=np.nan,
+    both_sig=False,
+    mbls_fap=np.nan,
 ) -> tuple:
     """
     Core R code decision logic. Returns (r_code, notes_string).
@@ -354,34 +357,59 @@ def _compute_r_code(
             return min(r, ceiling), note
 
         if regime in ("dense", "rich_multiyear", "combined"):
-            if p_value < 0.001:
+            if both_sig:
+                # Both MHAOV and MBLS independently confirm the period.
+                # MBLS uses all bands — this is the strongest possible evidence.
                 r = 3
                 note = _note(
                     f"All 3 methods agree (spread={period_spread*100:.1f}%), "
-                    f"p={p_value:.2e}, dense regime. High confidence."
+                    f"MHAOV p={p_value:.2e} and MBLS FAP={mbls_fap:.4f} both significant. "
+                    f"Dense regime. High confidence."
                 )
-            elif p_value < 0.01:
+            elif p_value < 0.001:
+                # Only MHAOV significant — MBLS FAP not available or marginal.
+                # Could be a single-band dominated dataset or unlucky permutations.
                 r = 2
                 note = _note(
                     f"All 3 methods agree (spread={period_spread*100:.1f}%), "
-                    f"p={p_value:.2e} marginal. Moderate confidence."
+                    f"MHAOV p={p_value:.2e} significant, "
+                    f"MBLS FAP={mbls_fap:.4f} not confirmed. Moderate confidence."
+                )
+            elif not np.isnan(mbls_fap) and mbls_fap < 0.001:
+                # Only MBLS significant — MHAOV marginal (common for faint
+                # multi-band objects where single-band power is diluted).
+                r = 2
+                note = _note(
+                    f"All 3 methods agree (spread={period_spread*100:.1f}%), "
+                    f"MBLS FAP={mbls_fap:.4f} significant (multi-band), "
+                    f"MHAOV p={p_value:.2e} marginal. Moderate confidence."
                 )
             else:
                 r = 1
                 note = _note(
-                    f"Methods agree but p={p_value:.2e} not significant. Tentative."
+                    f"Methods agree but neither gate strongly significant "
+                    f"(MHAOV p={p_value:.2e}, MBLS FAP={mbls_fap:.4f}). Tentative."
                 )
         else:
-            if p_value < 0.001:
+            if both_sig:
                 r = 2
                 note = _note(
                     f"All 3 methods agree (spread={period_spread*100:.1f}%), "
-                    f"p={p_value:.2e}, sparse regime. Moderate confidence."
+                    f"both gates significant (MHAOV p={p_value:.2e}, "
+                    f"MBLS FAP={mbls_fap:.4f}), sparse regime. Moderate confidence."
+                )
+            elif p_value < 0.001 or (not np.isnan(mbls_fap) and mbls_fap < 0.001):
+                r = 2
+                note = _note(
+                    f"All 3 methods agree (spread={period_spread*100:.1f}%), "
+                    f"one gate significant (MHAOV p={p_value:.2e}, "
+                    f"MBLS FAP={mbls_fap:.4f}), sparse regime. Moderate confidence."
                 )
             else:
                 r = 1
                 note = _note(
-                    f"Methods agree but sparse data and p={p_value:.2e}. Low confidence."
+                    f"Methods agree but sparse data and both gates marginal "
+                    f"(MHAOV p={p_value:.2e}, MBLS FAP={mbls_fap:.4f}). Low confidence."
                 )
 
         # Append contamination note if ceiling was capped

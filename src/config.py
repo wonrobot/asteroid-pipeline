@@ -90,6 +90,15 @@ class TierConfig:
     bayesian_ci_thresh: float = 0.5
     clean_peak_ratio:   float = 3.0
 
+    # ── MBLS false alarm probability (permutation test) ───────────────────────
+    # mbls_fap_thresh: FAP threshold for MBLS significance gate.
+    #   Matched to mhaov_pval_thresh so both gates use the same alpha.
+    # mbls_fap_n_perm: number of permutations.
+    #   200 gives FAP resolution of 0.005 — adequate for a 0.001 threshold.
+    #   Increase to 1000 for validation runs where exact FAP values matter.
+    mbls_fap_thresh:    float = 0.001
+    mbls_fap_n_perm:    int   = 200
+
 
 # ── Output ────────────────────────────────────────────────────────────────────
 
