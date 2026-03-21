@@ -64,9 +64,9 @@ class DataConfig:
 class PeriodConfig:
     """Period search grid and algorithm settings."""
 
-    period_min_hr:  float = 0.01  # hard floor (36s) — actual floor computed
-                                  # dynamically from Nyquist cadence in preprocess()
-                                  # For Rubin First Look this resolves to ~0.047hr
+    period_min_hr:  float = 0.005 # hard floor (18s) — actual floor computed
+                                  # dynamically via Eyer & Bartholdi (1999) in preprocess()
+                                  # For Rubin First Look this resolves to ~0.023hr
     period_max_hr:  float = 24.0
     n_grid_coarse:  int   = 2_000
     n_grid_fine:    int   = 3_000

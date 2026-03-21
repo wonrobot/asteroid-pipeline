@@ -113,51 +113,53 @@ def run_tier1(
         return _reject(data, config,
                        f"SNR={data.snr:.2f} < threshold={cfg_t.snr_threshold}")
 
-    # ── Period grid ───────────────────────────────────────────────────────────
-    # Tier 1 grid — two-pass strategy with window-qualified expansion
+    # ── Period grid — two-pass strategy ─────────────────────────────────────
     #
-    # Pass 1: coarse search from 0.5hr floor (2000 pts, always fast ~1s).
-    #         Window function computed on this coarse grid immediately after
-    #         so we can qualify the Pass 2 trigger.
+    # Pass 1: coarse grid from 0.5hr (2000 pts, fast ~0.5s for all objects).
+    #         Screens for normal rotators (P > 0.5hr) at low cost.
+    #         Window function computed on coarse grid to qualify Pass 2.
     #
-    # Pass 2: expand to Nyquist floor only when BOTH conditions hold:
-    #   (a) power is weak OR best period is near the 0.5hr boundary, AND
-    #   (b) the coarse best period is NOT window-contaminated
+    # Pass 2: expand to the Eyer & Bartholdi period floor (data.period_min_hr,
+    #         typically ~0.023 hr for Rubin) when the coarse result suggests
+    #         the true period may be below 0.5hr.
     #
-    # Rationale for condition (b):
-    #   Low coarse power has two explanations:
-    #     i.  True period is below 0.5hr (fast rotator) — expansion helps.
-    #     ii. Coarse best period is a cadence alias; real signal is elsewhere
-    #         on the same grid — expansion wastes time and may find a spurious
-    #         sub-0.5hr alias peak instead.
-    #   We now distinguish these cases using the window function.
-    #   If the coarse best is contaminated, we keep the coarse grid and let
-    #   window-penalised peak selection (below) find the real signal.
-    #   This avoids unnecessary 20k-point grid expansions and prevents
-    #   cadence aliases from triggering fast-rotator searches.
+    #         Trigger conditions (any one):
+    #           (a) near_boundary: best coarse period < 0.75hr — could be P/2
+    #           (b) weak_power: max coarse power < 0.15 — signal may be hiding
+    #               below 0.5hr (but only if coarse best is NOT window-
+    #               contaminated — low power from an alias should not trigger
+    #               a fast-rotator search)
+    #
+    #         For Rubin data, data.period_min_hr ≈ 0.023 hr (Eyer & Bartholdi),
+    #         so can_search_fast is almost always True and the decision reduces
+    #         to whether the coarse result warrants expansion.
+    #
+    #         Grid density follows Greenstreet et al. (2026) Eq. 4:
+    #           n = 5 × T × (1/P_min − 1/P_max)   [5× for T1 speed]
+    #         Tier 2 uses 100× for full precision.
     p_max_t1    = min(cfg_p.period_max_hr, data.baseline_hr)
-    FAST_THRESH = 0.5  # hr
+    FAST_THRESH = 0.5  # hr — coarse search floor
 
-    # Pass 1: coarse grid from 0.5hr (fast for all objects)
-    p_min_coarse   = max(data.period_min_hr, FAST_THRESH)
-    test_periods   = np.linspace(p_min_coarse, p_max_t1, cfg_p.n_grid_coarse)
-    gls_pow_coarse = gls_periodogram(data.t_hrs, data.y_dt, data.dy, test_periods)
-    best_coarse    = test_periods[np.argmax(gls_pow_coarse)]
-    max_pow_coarse = float(gls_pow_coarse.max())
+    # Pass 1: coarse grid from 0.5hr
+    p_min_coarse    = max(data.period_min_hr, FAST_THRESH)
+    test_periods    = np.linspace(p_min_coarse, p_max_t1, cfg_p.n_grid_coarse)
+    gls_pow_coarse  = gls_periodogram(data.t_hrs, data.y_dt, data.dy, test_periods)
+    best_coarse     = test_periods[np.argmax(gls_pow_coarse)]
+    max_pow_coarse  = float(gls_pow_coarse.max())
 
-    # Window function on coarse grid — needed to qualify Pass 2 trigger
-    window_pow_coarse = compute_window_function(data.t_hrs, test_periods)
-    coarse_cont       = contamination_score(best_coarse, test_periods, window_pow_coarse)
+    # Window function on coarse grid — qualifies Pass 2 trigger
+    window_pow_coarse   = compute_window_function(data.t_hrs, test_periods)
+    coarse_cont         = contamination_score(best_coarse, test_periods, window_pow_coarse)
     coarse_contaminated = coarse_cont > CONTAMINATION_THRESHOLD
 
-    near_boundary   = best_coarse < FAST_THRESH * 1.5
-    weak_power      = max_pow_coarse < 0.15
-    can_search_fast = data.period_min_hr < FAST_THRESH
+    near_boundary   = best_coarse < FAST_THRESH * 1.5    # period near 0.5hr boundary
+    weak_power      = max_pow_coarse < 0.15               # low coarse power
+    can_search_fast = data.period_min_hr < FAST_THRESH    # floor supports sub-0.5hr
 
-    # Pass 2 trigger: power condition fires AND coarse best is not a known alias
-    # near_boundary always expands — a period at 0.6hr could be 0.5hr P/2;
-    # this is a genuine harmonic concern unrelated to alias contamination.
-    should_expand = (near_boundary or (weak_power and not coarse_contaminated)) and can_search_fast
+    # Pass 2: expand grid to Eyer & Bartholdi floor
+    # near_boundary always expands (harmonic concern, alias-independent).
+    # weak_power only expands if coarse best is not a known alias peak.
+    should_expand = (near_boundary or (weak_power and not coarse_contaminated))                     and can_search_fast
 
     if coarse_contaminated and weak_power and not near_boundary:
         logger.debug(
@@ -167,16 +169,18 @@ def run_tier1(
         )
 
     if should_expand:
-        n_fast       = min(20_000, max(cfg_p.n_grid_coarse,
-                           int(5 * data.baseline_hr
-                               * (1.0/data.period_min_hr - 1.0/p_max_t1))))
+        # Greenstreet-style grid: 5× oversampling for T1 speed (Tier 2 uses 100×)
+        n_fast = min(50_000, max(cfg_p.n_grid_coarse,
+                     int(5 * data.baseline_hr
+                         * (1.0/data.period_min_hr - 1.0/p_max_t1))))
         test_periods = np.linspace(data.period_min_hr, p_max_t1, n_fast)
         logger.debug(
-            f"{data.provid}: Pass 2 expanded grid to {len(test_periods)} pts "
-            f"(near_boundary={near_boundary}, weak={weak_power}, "
+            f"{data.provid}: Pass 2 expanded to {len(test_periods)} pts "
+            f"(floor={data.period_min_hr*60:.1f}min, "
+            f"near_boundary={near_boundary}, weak={weak_power}, "
             f"coarse_cont={coarse_cont:.2f})"
         )
-    # else: keep coarse test_periods — normal rotator or contaminated alias
+    # else: keep coarse test_periods — normal rotator or alias-suppressed
 
     # ── GLS — uses merged, band-offset-corrected + detrended series ───────────
     gls_pow  = gls_periodogram(data.t_hrs, data.y_dt, data.dy, test_periods)

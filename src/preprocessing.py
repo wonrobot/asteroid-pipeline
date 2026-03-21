@@ -71,33 +71,59 @@ class PreparedData:
     snr:              float
     band_counts:      Dict[str, int]
     geometry_applied: bool          # True if JPL Horizons data was used
-    period_min_hr:    float          # data-driven Nyquist floor (hours)
+    period_min_hr:    float          # data-driven period floor — Eyer & Bartholdi 1999 (hours)
 
 
 # ── Main function ─────────────────────────────────────────────────────────────
 
-def compute_nyquist_floor(
-    t_hrs:      np.ndarray,
-    n_cycles:   float = 4.0,
-    clamp_lo:   float = 0.01,
-    clamp_hi:   float = 0.5,
+def compute_period_floor(
+    t_hrs:    np.ndarray,
+    clamp_lo: float = 0.005,   # 18 seconds — hard physical floor
+    clamp_hi: float = 0.5,     # 30 minutes — fallback for sparse data
 ) -> float:
     """
-    Data-driven period floor from actual observation cadence.
+    Data-driven minimum detectable period using the Eyer & Bartholdi (1999)
+    effective Nyquist frequency for irregularly sampled data.
 
-    Uses the 10th percentile of intra-night gaps (gaps < 1hr) as the
-    minimum cadence, then requires n_cycles observations per rotation.
+    Classical Nyquist (P_min = 2Δt) applies only to REGULAR sampling.
+    For irregular data, aliases from evenly-spaced cadence do not stack
+    coherently, so signals can be detected at frequencies well above the
+    classical Nyquist limit. Eyer & Bartholdi (1999, A&AS 135, 1) show
+    that for irregular sampling the effective frequency limit is:
 
-    For Rubin First Look: typical min gap ~0.68 min → floor ~0.047hr.
-    This correctly marks MJ71/MN45 (0.031hr) as undetectable while
-    opening MG56 (0.264hr) and MK41 (0.063hr) for analysis.
+        f_eff ≈ 1 / (2 × δt_min)
+
+    where δt_min is the minimum time separation between observations.
+    This is empirically supported by Greenstreet et al. (2026), who detect
+    MK41 at P=0.063 hr and MN45/MJ71 at P=0.031 hr using Rubin data with
+    ~0.68-minute minimum gaps — consistent with f_eff > 240 cycles/day
+    (P_min < 0.1 hr) as stated in their Section 4.1.1.
+
+    Implementation
+    --------------
+    1. Take the 5th percentile of all intra-visit gaps (gaps < 30 min).
+       The 5th percentile is more robust than the strict minimum against
+       occasional duplicate timestamps or sub-second rounding.
+    2. Apply Eyer & Bartholdi: P_min = 2 × gap_5pct
+    3. Clamp to [clamp_lo, clamp_hi].
+
+    For Rubin First Look commissioning data:
+        typical min gap ≈ 0.68 min = 0.0113 hr
+        → P_min = 2 × 0.0113 = 0.023 hr  (≈1.4 minutes)
+
+    This correctly matches Greenstreet's search floor of 0.024 hr and
+    allows detection of MK41 (0.063 hr), MG56 (0.264 hr), and in
+    principle MN45/MJ71 (0.031 hr) if phase coverage is sufficient.
+
+    The old compute_nyquist_floor (n_cycles × p10_cadence) was conceptually
+    wrong — it applied a regular-sampling concept to irregular data and
+    produced a floor of ~0.047 hr, unnecessarily excluding fast rotators.
 
     Parameters
     ----------
-    t_hrs    : observation times in hours
-    n_cycles : how many obs per rotation required (4 = conservative)
-    clamp_lo : absolute minimum floor in hours (default 0.01 = 36s)
-    clamp_hi : absolute maximum floor in hours (default 0.5)
+    t_hrs    : observation times in hours (sorted or unsorted)
+    clamp_lo : hard minimum floor (default 0.005 hr = 18s)
+    clamp_hi : fallback when data is too sparse to compute gap (default 0.5 hr)
 
     Returns
     -------
@@ -106,15 +132,22 @@ def compute_nyquist_floor(
     if len(t_hrs) < 4:
         return clamp_hi
 
-    gaps       = np.diff(np.sort(t_hrs))
-    intra      = gaps[(gaps > 0) & (gaps < 1.0)]  # intra-night only
+    gaps  = np.diff(np.sort(t_hrs))
+    intra = gaps[(gaps > 0) & (gaps < 0.5)]   # intra-visit only (< 30 min)
 
     if len(intra) < 4:
         return clamp_hi
 
-    p10_cadence = float(np.percentile(intra, 10))
-    floor       = n_cycles * p10_cadence
+    # 5th percentile of minimum gaps → robust minimum cadence
+    gap_p5    = float(np.percentile(intra, 5))
+    floor     = 2.0 * gap_p5   # Eyer & Bartholdi effective Nyquist
     return float(np.clip(floor, clamp_lo, clamp_hi))
+
+
+# Keep old name as alias for backward compatibility with any external code
+def compute_nyquist_floor(t_hrs, n_cycles=4.0, clamp_lo=0.01, clamp_hi=0.5):
+    """Deprecated — use compute_period_floor (Eyer & Bartholdi 1999)."""
+    return compute_period_floor(t_hrs, clamp_lo=clamp_lo, clamp_hi=clamp_hi)
 
 
 def preprocess(
@@ -228,11 +261,11 @@ def preprocess(
     )
 
     # Data-driven period floor — overrides config minimum if tighter
-    nyquist_floor = compute_nyquist_floor(t_hrs)
+    nyquist_floor = compute_period_floor(t_hrs)   # Eyer & Bartholdi 1999
     effective_min = max(nyquist_floor, config.period.period_min_hr)
 
     logger.debug(
-        f"{provid}: Nyquist floor={nyquist_floor*60:.1f}min "
+        f"{provid}: Period floor (Eyer&Bartholdi)={nyquist_floor*60:.1f}min "
         f"effective_min={effective_min*60:.1f}min"
     )
 

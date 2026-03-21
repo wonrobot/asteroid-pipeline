@@ -835,3 +835,86 @@ class TestBandNaming:
         for b in DEFAULT_CONFIG.data.bands_use:
             assert b.startswith("L") or len(b) > 1, \
                 f"bands_use default contains non-canonical name: {b}"
+
+
+# ── Tests: Eyer & Bartholdi period floor ─────────────────────────────────────
+
+class TestPeriodFloor:
+    def test_floor_below_nyquist_for_dense_irregular_data(self):
+        """
+        For dense irregular data, Eyer & Bartholdi floor should be well
+        below classical 0.5hr Nyquist — enabling fast rotator detection.
+        """
+        from preprocessing import compute_period_floor
+        # Simulate Rubin-like irregular sampling: ~1min gaps within visits
+        rng = np.random.default_rng(0)
+        # 10 visits, each with 5 obs spaced ~1 min apart, visits ~2hr apart
+        t = []
+        for night in range(3):
+            for visit in range(10):
+                t_start = night * 24 + visit * 2.0
+                t += [t_start + rng.uniform(0, 0.02) * i for i in range(5)]
+        t_hrs = np.sort(np.array(t))
+        floor = compute_period_floor(t_hrs)
+        assert floor < 0.1, f"Floor={floor:.4f}hr should be < 0.1hr for Rubin-like data"
+        assert floor > 0.005, f"Floor={floor:.4f}hr should be > hard clamp 0.005hr"
+
+    def test_floor_matches_greenstreet_rubin_range(self):
+        """
+        For ~0.68 min minimum gaps (Rubin commissioning), floor should be
+        near Greenstreet's 0.024hr = 1.4 min.
+        """
+        from preprocessing import compute_period_floor
+        rng = np.random.default_rng(1)
+        # ~0.68 min = 0.0113 hr minimum gaps
+        base_gaps = np.full(200, 0.0113)
+        base_gaps += rng.uniform(0, 0.005, 200)   # small jitter
+        t_hrs = np.concatenate([[0], np.cumsum(base_gaps)])
+        floor = compute_period_floor(t_hrs)
+        # Should be approximately 2 × 0.0113 = 0.023 hr
+        assert floor < 0.05, f"Floor={floor*60:.1f}min, expected ~1.4min"
+        assert floor > 0.01, f"Floor too low: {floor*60:.1f}min"
+
+    def test_floor_higher_for_sparse_data(self):
+        """Sparse data with few observations should give higher floor (less confident)."""
+        from preprocessing import compute_period_floor
+        # Only 3 obs total — should return clamp_hi
+        t_sparse = np.array([0.0, 2.0, 4.0])
+        floor = compute_period_floor(t_sparse)
+        assert floor == 0.5, f"Sparse data should return clamp_hi=0.5, got {floor}"
+
+    def test_backward_compat_alias(self):
+        """compute_nyquist_floor alias still works (backward compatibility)."""
+        from preprocessing import compute_nyquist_floor, compute_period_floor
+        t = np.linspace(0, 10, 100)
+        assert compute_nyquist_floor(t) == compute_period_floor(t)
+
+    def test_floor_enables_mk41_detection(self):
+        """
+        For Rubin data, floor must be below MK41's period (0.063hr).
+        This was the key failure of the old Nyquist-based floor (0.047hr
+        was above 0.063hr in some cases, and the concept was wrong).
+        """
+        from preprocessing import compute_period_floor
+        rng = np.random.default_rng(2)
+        # Simulate 426 obs (MK41 has 426) with ~1min Rubin gaps
+        t_hrs = np.sort(rng.uniform(0, 12*24, 426))   # 12 days baseline
+        floor = compute_period_floor(t_hrs)
+        MK41_PERIOD = 0.063  # hr
+        assert floor < MK41_PERIOD, \
+            f"Floor={floor*60:.1f}min is above MK41 period={MK41_PERIOD*60:.1f}min — " \
+            f"fast rotator would be missed"
+
+    def test_tier2_grid_uses_100x_oversampling(self):
+        """Tier 2 grid formula must use 100× oversampling (Greenstreet Eq. 4)."""
+        with open('src/tier2.py') as f:
+            src = f.read()
+        assert 'int(100 * data.baseline_hr' in src, \
+            "Tier 2 grid must use 100× oversampling (Greenstreet et al. 2026 Eq. 4)"
+
+    def test_tier1_grid_uses_5x_oversampling(self):
+        """Tier 1 expansion grid uses 5× oversampling for speed."""
+        with open('src/tier1.py') as f:
+            src = f.read()
+        assert 'int(5 * data.baseline_hr' in src, \
+            "Tier 1 Pass 2 expansion grid should use 5× oversampling"

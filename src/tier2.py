@@ -178,17 +178,25 @@ def run_tier2(
     cfg_p = config.period
     cfg_t = config.tier
 
-    # Fine period grid — dynamic sizing, data-driven floor
-    t1_best    = t1result.best_period_mbls
+    # Fine period grid — Greenstreet et al. (2026) Equation 4:
+    #   n = 100 × T_days × (f_max − f_min)
+    #   = 100 × T_hrs × (1/P_min_hrs − 1/P_max_hrs)
+    #
+    # The 100× oversampling ensures a smoothly resolved periodogram even
+    # for fast rotators. T1 best period focuses the search: below 0.5hr
+    # we keep the full range down to the Eyer & Bartholdi floor; above
+    # 0.5hr we start from T1/4 to capture P/2 and P/3 harmonics.
+    t1_best = t1result.best_period_mbls
     if t1_best < 0.5:
-        p_min  = data.period_min_hr
-        n_cap  = 50_000
+        p_min = data.period_min_hr   # full range — genuine fast rotator
+        n_cap = 100_000              # allow dense grid for sub-hour periods
     else:
-        p_min  = max(data.period_min_hr, t1_best / 4.0)
-        n_cap  = 8_000
+        p_min = max(data.period_min_hr, t1_best / 4.0)
+        n_cap = 50_000
     p_max = min(cfg_p.period_max_hr, data.baseline_hr)
+    # Greenstreet Eq. 4: n = 100 × T × (f_max − f_min)
     n_t2  = max(cfg_p.n_grid_fine,
-                int(10 * data.baseline_hr * (1.0/p_min - 1.0/p_max)))
+                int(100 * data.baseline_hr * (1.0/p_min - 1.0/p_max)))
     n_t2  = min(n_t2, n_cap)
     test_periods = np.linspace(p_min, p_max, n_t2)
 

@@ -236,6 +236,40 @@ R=1 otherwise — CE disagreement is still taken seriously when support is weak.
   safe defaults (`mbls_band_support_frac=0.0`) ensure backward compatibility.
 - **catalog**: `t2_mbls_band_support_frac`, `t2_mbls_n_bands_supporting` columns added.
 
+### Change 6 — Eyer & Bartholdi period floor replaces mis-applied Nyquist
+*Commit: (this commit)*
+
+Classical Nyquist (P_min = 2Δt) applies only to REGULAR sampling. Rubin
+observations are highly irregular — clustered in nightly visits with hour-long
+gaps between visits and seasonal gaps between seasons. The old
+`compute_nyquist_floor` used n_cycles × p10_cadence = ~0.047hr, which was
+conceptually wrong and excluded detectable fast rotators.
+
+**Eyer & Bartholdi (1999)** show that for irregular sampling, aliasing does
+not stack coherently and the effective detectable frequency is:
+
+    f_eff ≈ 1 / (2 × δt_min)
+
+where δt_min is the minimum time gap. For Rubin's ~0.68-minute minimum gap:
+P_min = 2 × 0.0113hr = **0.023hr (~1.4 minutes)** — matching Greenstreet's
+search floor of 0.024hr exactly. This is also consistent with their empirical
+statement that f_eff > 240 cycles/day (P < 0.1hr) for Rubin commissioning data.
+
+Impact: MK41 (0.063hr) and MG56 (0.264hr) were correctly detected before.
+MN45 and MJ71 (0.031hr) were previously excluded by the wrong floor — now
+within range if phase coverage is sufficient.
+
+**Tier 2 grid oversampling** increased from 10× to **100×** to match Greenstreet
+Equation 4: n = 100 × T_days × (f_max − f_min). This ensures the periodogram
+is smoothly resolved even for the shortest detectable periods.
+
+- **preprocessing**: `compute_period_floor()` replaces `compute_nyquist_floor()`;
+  Eyer & Bartholdi formula: P_min = 2 × 5th-percentile of intra-visit gaps;
+  old function kept as deprecated alias for backward compatibility
+- **config**: hard floor lowered from 0.01hr to 0.005hr (18s)
+- **tier2**: grid oversampling 10× → 100× (Greenstreet Eq. 4)
+- **tier1**: Pass 2 expansion grid updated with matching formula comment
+
 ### Planned
 
 - **Change 3**: Validate 0.5hr and 0.15 power thresholds against LCDB
