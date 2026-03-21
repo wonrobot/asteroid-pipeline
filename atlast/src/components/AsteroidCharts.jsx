@@ -5,6 +5,8 @@ const BC = { g:"#22c55e", r:"#f97316", i:"#3b82f6",
   Lg:"#22c55e", Lr:"#f97316", Li:"#3b82f6" };
 const BAND_LONG = { g:"g-band (480nm)", r:"r-band (620nm)", i:"i-band (750nm)",
   Lg:"g-band (480nm)", Lr:"r-band (620nm)", Li:"i-band (750nm)" };
+const getBandLabel = b => BAND_LONG[b] || BAND_LONG[b?.toLowerCase()] || b;
+const getBandColor = b => BC[b] || BC[b?.toLowerCase()] || "#94a3b8";
 
 function normArr(arr, max) {
   if (!arr||!arr.length) return [];
@@ -175,8 +177,8 @@ export default function AsteroidCharts({provid}) {
       x:d.fold.phase.filter((_,i)=>d.fold.band[i]===b),
       y:d.fold.mag.filter((_,i)=>d.fold.band[i]===b),
       error_y:{type:"data",array:d.fold.magerr.filter((_,i)=>d.fold.band[i]===b),
-        visible:true,color:BC[b]+"44",thickness:1},
-      mode:"markers",marker:{color:BC[b],size:3.5,opacity:0.85},
+        visible:true,color:getBandColor(b)+"44",thickness:1},
+      mode:"markers",marker:{color:getBandColor(b),size:3.5,opacity:0.85},
       type:"scatter",showlegend:false})),
     {x:d.fold.fitted_phase,y:d.fold.fitted_mag,
       mode:"lines",line:{color:"#1e3a5f",width:2},type:"scatter",showlegend:false},
@@ -188,17 +190,17 @@ export default function AsteroidCharts({provid}) {
     const phases=d.fold.phase.filter((_,i)=>d.fold.band[i]===b);
     const mags=d.fold.mag.filter((_,i)=>d.fold.band[i]===b);
     return {x:phases,y:mags.map((m,i)=>m-interp(phases[i])),
-      mode:"markers",marker:{color:BC[b],size:3,opacity:0.7},
+      mode:"markers",marker:{color:getBandColor(b),size:3,opacity:0.7},
       type:"scatter",showlegend:false};
   }):null;
 
   const mjd0 = Math.min(...d.obs.mjd);
   const lcT = bands.map(b=>({
-    x:d.obs.mjd.filter((_,i)=>d.obs.band[i]===b).map(m=>+(m-mjd0).toFixed(4)),
+    x:d.obs.mjd.filter((_,i)=>d.obs.band[i]===b).map(m=>+((m-mjd0)*24).toFixed(2)),
     y:d.obs.mag.filter((_,i)=>d.obs.band[i]===b),
     error_y:{type:"data",array:d.obs.magerr.filter((_,i)=>d.obs.band[i]===b),
-      visible:true,color:BC[b]+"44",thickness:1},
-    mode:"markers",marker:{color:BC[b],size:4,symbol:"circle",opacity:0.85},
+      visible:true,color:getBandColor(b)+"44",thickness:1},
+    mode:"markers",marker:{color:getBandColor(b),size:4,symbol:"circle",opacity:0.85},
     type:"scatter",showlegend:false}));
 
   const tabs=[
@@ -231,13 +233,13 @@ export default function AsteroidCharts({provid}) {
           <button key={t.id} style={{...S.tab,...(tab===t.id?S.on:{})}}
             onClick={()=>setTab(t.id)}>{t.label}</button>
         ))}
-        {P&&<span style={S.pill}>P = {P.toFixed(4)} hr</span>}
+
       </div>
 
       {/* PHASE FOLD */}
       {tab==="fold"&&d.fold&&<>
         <Row>
-          {bands.map(b=><Chip key={b} color={BC[b]} label={BAND_LONG[b]||b}/>)}
+          {bands.map(b=><Chip key={b} color={getBandColor(b)} label={getBandLabel(b)}/>)}
           <Chip color="#1e3a5f" label="fitted model"/>
         </Row>
         <div style={{display:"flex",flexDirection:"column"}}>
@@ -298,11 +300,11 @@ export default function AsteroidCharts({provid}) {
       {/* LIGHTCURVE */}
       {tab==="lc"&&<>
         <Row>
-          {bands.map(b=><Chip key={b} color={BC[b]} label={BAND_LONG[b]||b}/>)}
+          {bands.map(b=><Chip key={b} color={getBandColor(b)} label={getBandLabel(b)}/>)}
         </Row>
         <PlotDiv traces={lcT} height={270} layout={{
           ...BASE,
-          xaxis:{...XY,title:{text:"Days since first observation"}},
+          xaxis:{...XY,title:{text:"Hours since first observation"}},
           yaxis:{...XY,title:{text:"Magnitude"},autorange:"reversed"},
         }}/>
       </>}
