@@ -207,16 +207,25 @@ Both survive Colab disconnects.
 
 ## Validation results (Greenstreet et al. 2026, 76 objects)
 
-Run date: 2026-03-22. Pipeline state: pre-Change-3 (Change 3 not yet re-validated).
+Run date: 2026-03-22. Pipeline state: post-Change-3 + alias logic fix.
 
 | Set | Objects | Published (R≥1) | Exact (<10%) | Superfast |
 |-----|---------|-----------------|--------------|-----------|
-| Validation (37) | 37 | 34 (92%) | 21/37 (57%) | 7/9 |
-| Blind (39) | 39 | 30 (77%) | 20/39 (51%) | 7/10 |
+| Validation (37) | 37 | 36 (97%) | 20/37 (54%) | 6/9 |
+| Blind (39) | 39 | 38 (97%) | 20/39 (51%) | 7/10 |
 
-**Known issues:** 2 R=3 wrong answers (MD38, MH40 — methods agreed on alias).
-3 superfast misses (MJ71, MU15, ME68 — alias harmonic dominated at 12-day baseline).
-**Validation needs rerun** after Change 3 and alias logic fix.
+**R-code breakdown:** Validation: R=3×10, R=2×25, R=1×1, R=0×1, R=-1×0.
+Blind: R=3×9, R=2×26, R=1×3, R=0×0, R=-1×1.
+
+**Key improvements vs pre-Change-3:** Blind publication rate 77%→97% (alias fix
+eliminated false R=-1 vetoes). MK41 (P=0.063hr) now correctly recovered —
+Eyer & Bartholdi floor fix confirmed. One remaining R=-1 is MD67 (near 12hr alias,
+correct veto).
+
+**Known issues:** 2 R=3 wrong answers (MD38 Δ=40%, MH40 Δ=40% — all methods
+agreed on alias harmonic). 6 superfast misses: MJ71, MN25, MU15 (validation);
+ME68, MG56, MN45 (blind) — alias harmonics or insufficient phase coverage at
+12-day baseline. Fix: ZTF augmentation (Change 7 Phase 3) and LCDB wiring.
 
 ---
 
