@@ -301,13 +301,21 @@ def run_single_asteroid(
         f"sources={char.n_sources}"
     )
 
+    # ── Ensure source column exists ────────────────────────────────────────────
+    # DataFrames built manually (e.g. via direct quality cuts in the validation
+    # notebook) bypass _post_process and may lack the "source" column. Add it
+    # here so downstream code (characterise, _maybe_augment_ztf) never KeyErrors.
+    if "source" not in df_obj.columns:
+        df_obj = df_obj.copy()
+        df_obj["source"] = "Rubin"
+
     # ── Change 7: Optional ZTF augmentation ───────────────────────────────────
     # Gate: only trigger when the object would benefit from additional data
     # and we haven't already fetched ZTF data externally.
     df_obj = _maybe_augment_ztf(df_obj, char, config, provid)
 
     # Re-characterise if augmented (source count may have changed)
-    if df_obj["source"].nunique() > char.n_sources:
+    if "source" in df_obj.columns and df_obj["source"].nunique() > char.n_sources:
         char = characterise(df_obj)
         logger.debug(
             f"{provid}: post-ZTF regime={char.regime} "
