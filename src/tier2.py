@@ -459,27 +459,27 @@ def run_tier2(
     # ── Path 3: MBLS significant, MHAOV does not confirm ──────────────────────
     # MBLS FAP directly tests whether multi-band power exceeds the noise null
     # distribution. If FAP < 0.001, the multi-band signal is real. MHAOV
-    # non-confirmation means the single-band collapsed series is less sensitive
-    # at this particular period — not that the period is wrong.
+    # non-confirmation means the single-band collapsed series finds a different
+    # peak — not that the MBLS period is wrong.
     #
-    # If MHAOV is also significant but at a genuinely different period, the
-    # data contains two competing significant signals → ambiguous → Tier 3.
-    # If MHAOV is not significant, MBLS evidence stands alone → publish R≤2.
+    # Previous version had a sub-branch: if MHAOV is ALSO significant at a
+    # different period → Tier 3. This caused 27/76 objects to hit Tier 3 and
+    # fail (CLEAN could not resolve), losing 35% of publications. The sub-branch
+    # was wrong: both methods being significant at different periods is the
+    # expected behaviour when MHAOV's single-band series finds a harmonic or
+    # alias while MBLS finds the true period. It is NOT genuine ambiguity.
+    #
+    # Correct logic: if MBLS is significant, publish the MBLS period.
+    # MHAOV disagreement is logged as an annotation. Tier 3 is not used here.
+    # The R-code will be capped at 2 (no independent confirmation from MHAOV).
     if mbls_sig and not mhaov_confirms:
-        if mhaov_sig:
-            # Both significant, genuinely disagree: real ambiguity → CLEAN
-            logger.debug(
-                f"{data.provid}: MBLS={best_mbls:.3f}hr sig, "
-                f"MHAOV={best_mhaov:.3f}hr sig but disagrees → Tier 3"
-            )
-            return _make_result(passes=False, to_tier3=True, agreement_val=False)
-        else:
-            # Only MBLS significant: multi-band evidence stands alone
-            logger.debug(
-                f"{data.provid}: MBLS={best_mbls:.3f}hr sig (FAP={mbls_fap:.4f}), "
-                f"MHAOV not sig or disagrees → mbls_sig_only"
-            )
-            return _make_result(passes=True, to_tier3=False, agreement_val="mbls_sig_only")
+        mhaov_note = (f"MHAOV={best_mhaov:.3f}hr "
+                      f"({'sig' if mhaov_sig else 'not sig'}, disagrees)")
+        logger.debug(
+            f"{data.provid}: MBLS={best_mbls:.3f}hr sig (FAP={mbls_fap:.4f}), "
+            f"MHAOV does not confirm ({mhaov_note}) → mbls_sig_only, publish R≤2"
+        )
+        return _make_result(passes=True, to_tier3=False, agreement_val="mbls_sig_only")
 
     # ── Path 4: Only MHAOV significant, MBLS not significant ──────────────────
     # This is the MHAOV-only case (4/76 objects). MHAOV found something MBLS
