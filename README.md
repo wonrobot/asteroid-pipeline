@@ -272,10 +272,128 @@ is smoothly resolved even for the shortest detectable periods.
 
 ### Planned
 
-- **Change 3**: Validate 0.5hr and 0.15 power thresholds against LCDB
-  known-period asteroids. These are currently hardcoded heuristics.
+- **Change 3**: Validate 0.5hr and 0.15 power thresholds against known-period
+  asteroids. These are currently hardcoded heuristics — should be derived from
+  recovery rate curves on a labelled dataset.
+
+---
+
+## Roadmap: Change 7 — Multi-survey data augmentation
+
+### Motivation
+
+For asteroids with sparse Rubin observations, combining data from other surveys
+dramatically improves period recovery in two ways:
+
+1. **More observations** — additional data points improve phase coverage and
+   lower the noise floor
+2. **Different window functions** — each survey has its own cadence and gaps;
+   combining them suppresses survey-specific aliases that would confound a
+   single-survey analysis. CLEAN becomes especially powerful with combined data
+   because the joint window function has fewer dominant peaks.
+
+The `characterise.py` code already defines a `combined` regime with higher
+reliability ceilings and recommends all methods, but it is currently unreachable
+because `n_sources` is hardcoded to 1. This change wires it up.
+
+### External data sources
+
+**ZTF (Zwicky Transient Facility)** — *highest priority*
+- Public photometry via IRSA API
+- URL: `https://irsa.ipac.caltech.edu/docs/program_interface/ztf_lightcurve_api.html`
+- Bands: g/r/i (close to Rubin, cross-calibration needed)
+- Depth: ~mag 20.5 (shallower than Rubin ~24.5)
+- Cadence: 1–3 days; baseline since 2018 → 7+ year baseline available
+- Best for: long-period objects (P > 10hr) where Rubin's 12-day arc is insufficient;
+  sparse-regime objects where more observations are needed
+
+**ATLAS (Asteroid Terrestrial-impact Last Alert System)**
+- URL: `https://fallingstar-data.com/forcedphot/` (forced photometry API)
+- Bands: o (orange) and c (cyan) — broadband, not directly comparable to gri
+- Cadence: ~2 days, full sky coverage
+- Best for: multi-year baseline, bright asteroids (mag < 19)
+
+**MPC Observations Database**
+- URL: `https://minorplanetcenter.net/db_search`
+- Contains all submitted photometry from all observatories worldwide
+- Heterogeneous quality; useful for cross-checking and finding historical data
+
+**DAMIT (Database of Asteroid Models from Inversion Techniques)**
+- URL: `https://astro.troja.mff.cuni.cz/projects/damit/`
+- Spin-state solutions (period + pole + shape) for ~3,000 well-studied objects
+- Periods are high-confidence (equivalent to LCDB U=3)
+- Useful as additional validation source beyond LCDB
+
+**JPL Small-Body Database**
+- URL: `https://ssd.jpl.nasa.gov/tools/sbdb_query.cgi`
+- `rot_per` field sourced from multiple surveys
+- Queryable via API: `https://ssd-api.jpl.nasa.gov/sbdb_query.api`
+
+**CSS (Catalina Sky Survey)**
+- V-band and unfiltered; good for bright objects
+- Available via MPC
+
+### Implementation plan
+
+**Phase 1 — ZTF fetcher** (`src/sources/ztf.py`)
+- Query IRSA lightcurve API by object designation or coordinates
+- Return standardised DataFrame matching ingestion output format
+- Handle ZTF–Rubin cross-calibration (g/r/i zero-point offsets ~0.02–0.05 mag)
+- Tag all rows with `source="ZTF"` for window function separation
+
+**Phase 2 — Source tagging** (`src/ingestion.py`, `src/characterise.py`)
+- Add `source` column to observations DataFrame
+- Pass `n_sources = df["source"].nunique()` to `characterise()`
+- This unlocks `regime="combined"` in `_classify_regime()`
+
+**Phase 3 — Combined window function** (`src/precompute.py`, `src/tier2.py`)
+- Window function computed per-source; combined window = product
+- The joint window has fewer dominant peaks → less alias contamination
+- CLEAN most powerful in combined regime (already noted in `characterise.py`)
+
+**Phase 4 — ATLAS fetcher** (`src/sources/atlas.py`)
+- Forced photometry API requires registration
+- o/c bands need separate treatment (cannot be directly merged with gri)
+- Treat as independent periodogram cross-check, not direct data merge
+
+### Key scientific considerations
+
+- **Zero-point calibration**: ZTF g/r/i and Rubin g/r/i are not identical.
+  Offsets of 0.02–0.05 mag are typical. MBLS handles per-band offsets
+  internally so small zero-point differences are absorbed, but large
+  systematics (>0.1 mag) should be corrected first.
+- **Epoch correction**: observations from different surveys need heliocentric
+  distance correction before combining, otherwise the slow brightness trend
+  from changing geometry adds spurious long-period power.
+- **Methodological principle**: data augmentation must not be used to
+  retroactively fix failed detections. The decision to fetch ZTF data should
+  be made based on data quality criteria (n_obs, baseline, regime) before
+  running the period search, not after seeing a failed result.
+
+### Files to create
+
+```
+src/sources/ztf.py       # ZTF IRSA API fetcher
+src/sources/atlas.py     # ATLAS forced photometry fetcher  
+src/sources/jpl_sbdb.py  # JPL Small-Body Database period lookup
+src/sources/damit.py     # DAMIT spin-state lookup
+```
+
+### Files to modify
+
+```
+src/ingestion.py         # add source column tagging
+src/characterise.py      # wire n_sources from df["source"].nunique()
+src/pipeline.py          # optionally fetch ZTF before run_single_asteroid
+src/config.py            # add DataConfig.use_ztf, use_atlas flags
+```
 
 ## Notes on missing fields
+
+Without `heliodist`/`geodist`, the pipeline uses a quadratic polynomial to
+detrend the geometry effect. This is a reasonable approximation but will
+introduce ~0.05–0.1 mag systematic error in reduced magnitude. Adding distance
+columns from MPC/JPL Horizons is strongly recommended for production use.
 
 Without `heliodist`/`geodist`, the pipeline uses a quadratic polynomial to
 detrend the geometry effect. This is a reasonable approximation but will

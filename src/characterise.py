@@ -195,10 +195,17 @@ def characterise(
     snr_proxy   = mag_range / median_err if median_err > 0 else 0.0
 
     # ── Regime classification ─────────────────────────────────────────────────
-    # TODO: n_sources hardcoded to 1 — "combined" regime is currently unreachable.
-    # When adding ZTF or other surveys, pass n_sources here and update ingestion.py
-    # to tag observations by source before calling characterise().
-    n_sources = 1
+    # n_sources is hardcoded to 1 — "combined" regime is currently unreachable.
+    # Change 7 (see README roadmap) will wire this up:
+    #   1. Add source="Rubin"/"ZTF"/etc. column in ingestion._post_process
+    #   2. fetch_ztf() in sources/ztf.py fetches and tags ZTF observations
+    #   3. merge_with_rubin() combines and tags by source
+    #   4. Pass n_sources = df["source"].nunique() here
+    # When n_sources > 1, _classify_regime() returns "combined" which:
+    #   - enables all methods including CLEAN (most powerful for multi-survey)
+    #   - sets reliability_ceiling = "high"
+    #   - uses the joint window function (product of per-survey windows)
+    n_sources = 1   # CHANGE 7: replace with df_obj["source"].nunique()
     regime = _classify_regime(
         n_obs=n_obs,
         baseline_days=baseline_days,
