@@ -975,74 +975,104 @@ def apply_two_minima_lrt(
     dominant_band: str   = None,
 ) -> tuple:
     """
-    Likelihood ratio test for period doubling (Change 9).
+    Nested F-test for period doubling (Change 9, corrected).
 
-    Replaces the prominence-threshold 2-minima rule.  The old rule
-    (find_peaks with prominence=0.01 on a fitted curve) had an arbitrary
-    tuning parameter with no statistical basis.  This function uses an
-    F-test on the weighted residuals.
+    Physical question: does the lightcurve have a significant brightness
+    feature at the half-frequency 1/(2P)?  For a genuine double-hump
+    asteroid lightcurve sampled at its half-period P, the true rotation
+    period 2P contains a fundamental frequency component at 1/(2P) that
+    the P-model cannot represent.  This function tests whether that
+    component is statistically significant.
 
-    Procedure (Wilks 1938 / standard regression F-test):
-      1. Fit MBLS at candidate period P  → weighted residual chi2_P
-      2. Fit MBLS at candidate period 2P → weighted residual chi2_2P
-      3. The 2P model has 2 extra free parameters (cos + sin at freq 1/(2P))
-         not present in the P model.  Under H0 (true period is P):
-             F = ((chi2_P − chi2_2P) / 2) / (chi2_2P / (N − k_2P))
-         follows an F(2, N−k_2P) distribution asymptotically.
-      4. Double if p_value < alpha (default 0.05).
-         Otherwise keep P — the improvement is not significant.
+    The PREVIOUS implementation (initial Change 9) compared two
+    non-nested models:
+      H0_old: {sin(2πt/P), cos(2πt/P), ..., nterms harmonics of 1/P}
+      H1_old: {sin(πt/P),  cos(πt/P),  ..., nterms harmonics of 1/2P}
+    These share no basis functions (H0 has 2/P, H1 has 1/2P), so Wilks'
+    theorem does not apply, and chi2_H1 - chi2_H0 has no known
+    distribution.  In practice it was always 0 because each model
+    independently fits the data well at its own frequency.
 
-    Physical meaning: double only when the data contain a statistically
-    significant brightness feature at the half-frequency (i.e., the
-    lightcurve genuinely has unequal-depth minima at period 2P).
+    CORRECTED NESTED TEST:
+      H0 (restricted): nterms harmonics of 1/P
+                        {sin(2πkt/P), cos(2πkt/P)}, k=1..nterms
+      H1 (full):       H0 plus the 2P sub-fundamental pair
+                        {sin(πt/P), cos(πt/P)}
+    H0 ⊂ H1 by construction (H1 = H0 + 2 extra parameters).
+    chi2_H1 ≤ chi2_H0 always.  The F-test is valid (df_extra=2).
+
+    The H0 and H1 design matrices are built directly from the merged
+    (band-offset-corrected) photometry so that the weighted least-squares
+    fits are exact and the chi-squared values are comparable.
 
     Parameters
     ----------
-    period : candidate MBLS period in hours
-    nterms : Fourier terms used in the MBLS fit (must match T2 fit)
+    period : candidate MBLS period (raw, pre-doubling), hours
+    nterms : number of P-harmonics already in the model (must match T2)
     alpha  : F-test significance level for doubling (default 0.05)
 
     Returns
     -------
     (corrected_period, was_doubled, f_stat)
-      corrected_period : period after LRT decision (P or 2P)
-      was_doubled      : True if LRT chose 2P
-      f_stat           : F-statistic (for logging / catalog annotation)
     """
     from scipy.stats import f as f_dist
 
     N = len(t)
     w = 1.0 / dy**2
 
-    def _chi2(p: float) -> float:
-        """Weighted residual chi-sq for MBLS fit at period p."""
-        model = LombScargleMultiband(Nterms_base=nterms, Nterms_band=0)
-        model.fit(t, y_multiband, dy, bands)
-        y_pred = model.predict(t, filts=bands, period=p)
-        return float(np.sum(w * (y_multiband - y_pred) ** 2))
+    # ── Build per-band mean-subtracted merged series ──────────────────────────
+    # Use the same band-offset correction as Tier 2 detrending so the
+    # residual variance is comparable across bands.
+    unique_bands = np.unique(bands)
+    y_dt = y_multiband.copy()
+    for b in unique_bands:
+        mask = bands == b
+        y_dt[mask] -= np.average(y_multiband[mask], weights=w[mask])
 
-    chi2_P  = _chi2(period)
-    chi2_2P = _chi2(period * 2.0)
+    def _wls_chi2(A: np.ndarray) -> float:
+        """Weighted least-squares chi-sq: min_c ||W^{1/2}(y - Ac)||^2."""
+        Aw = A * w[:, np.newaxis]          # (N, k)
+        try:
+            coeffs = np.linalg.lstsq(Aw, w * y_dt, rcond=None)[0]
+        except np.linalg.LinAlgError:
+            return float(np.sum(w * y_dt**2))   # fallback: null model
+        resid = y_dt - A @ coeffs
+        return float(np.sum(w * resid**2))
 
-    # Number of parameters: intercept + nterms cos + nterms sin = 1 + 2*nterms
-    # 2P model adds 2 terms (cos + sin at the new fundamental 1/(2P))
-    k_P      = 1 + 2 * nterms
-    k_2P     = k_P + 2
-    df_extra = 2
-    df_resid = max(N - k_2P, 1)
+    # ── H0 design matrix: nterms harmonics of P ──────────────────────────────
+    cols_H0 = []
+    for k in range(1, nterms + 1):
+        phase = 2.0 * np.pi * k * t / period
+        cols_H0.append(np.cos(phase))
+        cols_H0.append(np.sin(phase))
+    A_H0 = np.column_stack(cols_H0)   # shape (N, 2*nterms)
 
-    # Improvement — clamp to zero to guard against numerical noise where
-    # chi2_2P is marginally larger than chi2_P due to fitting instability
-    improvement = max(chi2_P - chi2_2P, 0.0)
+    # ── H1 design matrix: H0 + sub-fundamental at 1/(2P) ────────────────────
+    # The 2P fundamental pair {cos(πt/P), sin(πt/P)} is the ONLY new term.
+    # All nterms harmonics of 1/P are already in H0 (k=1 of H0 IS 1/P).
+    sub_phase = np.pi * t / period   # = 2π t / (2P)
+    A_H1 = np.column_stack([
+        np.cos(sub_phase), np.sin(sub_phase),   # new: 2P fundamental
+        A_H0,                                   # existing: P harmonics
+    ])                                           # shape (N, 2*nterms + 2)
 
-    if chi2_2P <= 0:
-        # Degenerate fit (perfect residuals at 2P) — trust the 2P fit
+    chi2_H0 = _wls_chi2(A_H0)
+    chi2_H1 = _wls_chi2(A_H1)
+
+    df_extra = 2                          # one extra {cos, sin} pair
+    k_H1     = 2 * nterms + 2
+    df_resid = max(N - k_H1, 1)
+
+    # chi2_H1 ≤ chi2_H0 always (H1 is a superset).  Clamp numerical noise.
+    improvement = max(chi2_H0 - chi2_H1, 0.0)
+
+    if chi2_H1 <= 0:
         logger.debug(
-            f"LRT 2-minima: chi2_2P=0 at {period*2:.3f}hr — degenerate, doubling"
+            f"LRT 2-minima: chi2_H1=0 at {period*2:.3f}hr — degenerate, doubling"
         )
         return period * 2.0, True, np.inf
 
-    f_stat  = (improvement / df_extra) / (chi2_2P / df_resid)
+    f_stat  = (improvement / df_extra) / (chi2_H1 / df_resid)
     p_value = float(1.0 - f_dist.cdf(f_stat, df_extra, df_resid))
 
     if p_value < alpha:
