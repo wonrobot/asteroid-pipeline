@@ -68,13 +68,17 @@ ALIAS_PERIODS_HR = [
 ]
 ALIAS_TOLERANCE = 0.05   # 5%
 
-# Contamination score above which we treat a period as a cadence alias.
-# Validated against Greenstreet et al. 2026 ground truth: threshold=0.5 produced
-# false R=-1 flags on confirmed exact periods (MK23 6.174hr, MO35 6.286hr,
-# ML35 21.3hr, MU59 8.2hr, MA46 5.9hr — none near any real alias).
-# Raising to 0.7 eliminates those false positives while still catching
-# genuine alias contamination at the known daily/annual frequencies.
-WINDOW_ALIAS_THRESHOLD = 0.7
+# Window function contamination score used for the R-code cap (not R=-1 veto).
+# This is NOT a detection threshold — it does not veto a period on its own.
+# It is used only to cap R at 2 when contamination is high AND the significance
+# gates are marginal. See _compute_r_code() and flag_window_alias() for usage.
+#
+# Value: 0.5 is the natural midpoint of the [0,1] contamination scale and
+# corresponds to "the window power at this period is at least half the maximum
+# window peak". This is a conservative cap trigger — it will only fire for
+# periods that sit on genuinely prominent window peaks, not minor ripple.
+# No empirical tuning has been applied to this value.
+WINDOW_ALIAS_THRESHOLD = 0.5
 
 
 # ── Output dataclass ──────────────────────────────────────────────────────────
@@ -211,8 +215,43 @@ def compute_reliability(
         adopted_period, t1result
     )
 
-    # Combined alias flag — either layer triggers R=-1
-    any_alias = alias_risk or window_alias_risk
+    # Combined alias flag
+    # ─────────────────────────────────────────────────────────────────────────
+    # Layer 1 (fixed list) can independently trigger R=-1. The physical causes
+    # are universal and well-understood: Earth rotation (24hr, 12hr harmonics),
+    # Earth orbital period (365.25d, 182.6d). Citation: VanderPlas (2018 PASP).
+    #
+    # Layer 2 (window function) does NOT independently trigger R=-1.
+    #
+    # Scientific basis: a high contamination score means the window function
+    # peaks near the adopted period, but "the window peaks here" and "the signal
+    # is an alias" are not the same statement. The signal could be real at a
+    # period that happens to coincide with a cadence gap — this is expected for
+    # any sufficiently dense period grid. The MBLS FAP already tests whether the
+    # observed power exceeds the noise null distribution. If the FAP is low, that
+    # is direct statistical evidence for a real signal, which outweighs the
+    # indirect evidence from window contamination.
+    #
+    # Combining both as an OR-veto would implicitly weight them equally, which
+    # requires a calibrated ROC analysis on simulated data to justify — exactly
+    # the kind of post-hoc threshold tuning the project avoids. See Change 3 in
+    # the README (planned: derive thresholds from recovery rate curves).
+    #
+    # Layer 2 is instead used in two weaker roles:
+    #   (a) r_flag annotation ("cadence_alias") — visible in the catalog
+    #   (b) R-code cap inside _compute_r_code() when contamination is high AND
+    #       the significance evidence is not strong (caps R at 2, not at -1)
+    #
+    # The one case where Layer 2 DOES join the hard veto: when the window shows
+    # high contamination AND neither significance gate fires. In that case there
+    # is no independent evidence for the period at all — both the window and the
+    # FAP agree there is no signal, so R=-1 is warranted.
+    mhaov_sig  = getattr(t2result, 'mhaov_sig', False) if t2result is not None else False
+    mbls_sig   = getattr(t2result, 'mbls_sig',  False) if t2result is not None else False
+    either_sig = mhaov_sig or mbls_sig
+
+    # Hard alias flag: Layer 1 always counts; Layer 2 only when no sig support
+    any_alias = alias_risk or (window_alias_risk and not either_sig)
 
     # ── LCDB comparison ───────────────────────────────────────────────────────
     lcdb_agreement  = "no_prior"
@@ -252,11 +291,20 @@ def compute_reliability(
     )
 
     # ── Build r_flag string ───────────────────────────────────────────────────
+    # Layer 1 (fixed list) alias → always annotated, triggers R=-1
+    # Layer 2 (window) + no sig → hard veto, annotated as cadence_alias
+    # Layer 2 (window) + sig present → soft note only, R capped at 2 internally
     r_flag = str(r_code)
-    if any_alias and r_code > 0:
+    if alias_risk:
+        # Fixed-list alias: always a hard flag
         r_flag = f"{r_code}-alias"
-    if window_alias_risk and not alias_risk and r_code > 0:
+    elif window_alias_risk and not either_sig:
+        # Window alias with no significance: hard veto (any_alias=True → r_code=-1)
         r_flag = f"{r_code}-cadence_alias"
+    elif window_alias_risk and either_sig:
+        # Window alias but signal IS significant: soft annotation only
+        # r_code already capped at 2 by _compute_r_code(); flag it for catalog
+        r_flag = f"{r_code}-cadence_alias_soft"
 
     logger.debug(
         f"{provid}: R={r_code} ({r_flag}) P={adopted_period:.3f}hr "

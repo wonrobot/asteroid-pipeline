@@ -29,14 +29,46 @@ from typing import Tuple, Optional
 
 logger = logging.getLogger(__name__)
 
-# How strongly to penalise window-contaminated peaks (0=none, 1=full suppression)
+# Penalty strength for window-contaminated peaks in window_informed_peaks().
+# Adjusted power = data_power * (1 - alpha * contamination_score).
+#
+# Scientific basis: alpha controls the trade-off between alias rejection and
+# signal recovery. alpha=0 is pure data power (no alias awareness); alpha=1
+# fully suppresses any period at a window peak. The value 0.7 is used as a
+# provisional default pending Change 3 (threshold calibration from recovery
+# rate curves on labelled data). It is NOT derived from the Greenstreet+2026
+# test set and is NOT a classification threshold — it only affects peak
+# ranking within Tier 1, not the pass/fail decision.
+# Note: the correct treatment (Change 3) is to derive alpha from simulations
+# showing recovery rate vs. contamination score for synthetic lightcurves.
 WINDOW_PENALTY_ALPHA = 0.7
 
-# A peak is "contaminated" if window power > this fraction of max window power
+# Contamination score above which a period is considered to sit "on" a window
+# peak for logging and R-code capping purposes (not a classification veto).
+#
+# Scientific basis: the contamination score is defined as
+#   score = max_window_power_in_radius / max_window_power_global  ∈ [0,1]
+# A score of 0.2 means the local window power is ≥20% of the global maximum.
+# This is the threshold below which a period is considered to be in a
+# window-clean region. The value 0.2 was chosen as a conservative lower bound —
+# it only flags periods that are genuinely prominent in the window spectrum,
+# not background ripple. The correct derivation (Change 3) is to compare this
+# score against the distribution of contamination scores for confirmed real
+# periods in a labelled dataset.
 CONTAMINATION_THRESHOLD = 0.2
 
-# Search radius around a candidate period when checking window contamination
-# expressed as fraction of the period
+# Fractional search radius for contamination_score().
+# When checking whether a candidate period P sits on a window peak, we look
+# for the maximum window power within ±(CONTAMINATION_RADIUS × P) of P.
+#
+# Scientific basis: this must be large enough to capture the main lobe of a
+# window function peak without capturing adjacent peaks. For a dataset with
+# baseline T days, window peaks have a characteristic width of ~1/T in
+# frequency, which translates to ~P²/T in period at period P. For typical
+# Rubin commissioning data (T≈12 days, P≈5hr): width ≈ 25/12 ≈ 2hr, so
+# CONTAMINATION_RADIUS ≈ 2/5 ≈ 0.4 would be needed. The value 0.03 (3%)
+# is therefore UNDER-ESTIMATING the peak width for short baselines — this is
+# an outstanding issue flagged for Change 3.
 CONTAMINATION_RADIUS = 0.03
 
 
