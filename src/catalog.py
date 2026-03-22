@@ -267,10 +267,23 @@ def save_catalog(
     catalog_df: pd.DataFrame,
     config:     PipelineConfig = DEFAULT_CONFIG,
 ) -> None:
-    """Save catalog DataFrame to CSV."""
+    """Save catalog DataFrame to CSV.
+
+    If the configured path is on a remote mount that has become unavailable,
+    saves a local fallback copy to /content/catalog_fallback.csv so no
+    results are lost.
+    """
     os.makedirs(config.output.results_dir, exist_ok=True)
-    catalog_df.to_csv(config.output.catalog_file, index=False)
-    logger.info(f"Saved catalog: {len(catalog_df)} rows → {config.output.catalog_file}")
+    primary = config.output.catalog_file
+    try:
+        catalog_df.to_csv(primary, index=False)
+        logger.info(f"Saved catalog: {len(catalog_df)} rows → {primary}")
+    except OSError as e:
+        fallback = "/content/catalog_fallback.csv"
+        catalog_df.to_csv(fallback, index=False)
+        logger.warning(
+            f"Drive unavailable ({e}); catalog saved locally → {fallback}"
+        )
 
 
 def load_catalog(config: PipelineConfig = DEFAULT_CONFIG) -> pd.DataFrame:

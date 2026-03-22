@@ -436,16 +436,36 @@ def setup_logging(config: PipelineConfig = DEFAULT_CONFIG) -> None:
     """
     Configure logging to both console and log file.
     Call once at the start of a run.
+
+    If the configured log file path is on a remote mount (e.g. Google Drive)
+    that is unavailable, falls back to a local log file at
+    /content/pipeline_fallback.log so the run is never blocked by a
+    Drive connectivity issue.
     """
     os.makedirs(config.output.results_dir, exist_ok=True)
 
     level = logging.DEBUG if config.output.verbose else logging.INFO
     fmt   = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 
-    handlers = [
-        logging.StreamHandler(),
-        logging.FileHandler(config.output.log_file, mode="a"),
-    ]
+    handlers = [logging.StreamHandler()]
+
+    # Try to open the configured log file; fall back to a local path if the
+    # Drive mount is unavailable (OSError errno 107 = transport endpoint not
+    # connected; errno 5 = I/O error on FUSE).
+    log_path = config.output.log_file
+    try:
+        fh = logging.FileHandler(log_path, mode="a")
+        handlers.append(fh)
+    except OSError as e:
+        fallback = "/content/pipeline_fallback.log"
+        try:
+            fh = logging.FileHandler(fallback, mode="a")
+            handlers.append(fh)
+            print(f"[setup_logging] Drive log unavailable ({e}); "
+                  f"falling back to {fallback}")
+        except OSError:
+            print("[setup_logging] Could not open any log file — console only")
+
     for h in handlers:
         h.setFormatter(logging.Formatter(fmt))
 
