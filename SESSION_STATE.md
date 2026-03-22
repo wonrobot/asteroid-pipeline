@@ -1,212 +1,125 @@
-# Session State — Where to Continue From
+# Asteroid Pipeline — Session State
+Last updated: 2026-03-22 (Change 10)
 
-**Last updated:** 2026-03-22  
-**Last commit:** `91c3a93`  
-**Branch:** `main`
+## Repository
+https://github.com/wonrobot/asteroid-pipeline  branch: main
+Latest commit: 13011d9
 
----
+## Commit History (this project)
+- `1eda6df` Fix KeyError: source column + force-remount Drive
+- `52d72af` Fix OSError 107: Drive disconnect
+- `91c3a93` Fix stale module cache + improve KeyError reporting
+- `502bf63` docs: update validation results post-Change-3
+- `a5c8ef7` Add Greenstreet Table 3 additional periods
+- `a9cfa68` **Change 8**: MBLS-primary architecture — remove CE voting, fix 2-minima gate
+- `eb576af` docs: MBLS FAP coarse/fine grid limitation
+- `31dbc5d` Fix OSError 107 on logging close: _ResilientFileHandler
+- `5acbc74` Fix Change 8 regression: MBLS sig always publishes
+- `dc2d039` docs: update validation results post-Change-8
+- `0e0565c` **Change 9**: multi-peak T1→T2 handoff + LRT 2-minima test
+- `0ec7ede` Fix Change 9 LRT: correct nested model
+- `13011d9` **Change 10**: Bonferroni LRT, spin-barrier prior, T1 Trigger C, T2 top-5 peaks
 
-## What has been built (all committed, all tested)
+## Validation Results
 
-### Changes 1–6 (pre-session)
-| Change | Description | Status |
-|--------|-------------|--------|
-| 1 | Window function wired into Tier 1/2 and reliability | ✅ Done |
-| 2 | Dual significance gate: MBLS FAP via permutation test | ✅ Done |
-| 4 | Window-qualified Pass 2 expansion in Tier 1 | ✅ Done |
-| 5 | MBLS per-band support in two_of_three reliability path | ✅ Done |
-| 6 | Eyer & Bartholdi period floor replaces mis-applied Nyquist | ✅ Done |
+### Change 8 baseline (best before Change 9/10)
+| Set | Published | Exact | half_P | double_P | disagree |
+|-----|-----------|-------|--------|----------|---------|
+| Val (37) | 36/37 (97%) | 27 (73%) | 3 | 3 | 4 |
+| Blind (39) | 38/39 (97%) | 26 (67%) | 5 | 3 | 5 |
 
-### Changes completed this session
-| Change | Description | Commit |
-|--------|-------------|--------|
-| Change 3 | Heuristic thresholds replaced with peer-reviewable derivations | `d27177a` |
-| Change 7 Phase 1 | ZTF fetcher (`src/sources/ztf.py`) | `5ea0980` |
-| Change 7 Phase 2 | Source tagging + n_sources wiring + combined regime | `5ea0980` |
-| Alias logic fix | Window alias no longer independently vetoes — requires significance | `4910e25` |
-| Notebook fix | Both notebooks save to Drive (survive Colab disconnects) | `4910e25` + `5ea0980` |
-| Bug fix | KeyError: source column in run_single_asteroid | `1eda6df` |
-| Bug fix | OSError 107: Drive disconnect kills logging/catalog saves | `52d72af` |
-| Change 8 | MBLS-primary: remove CE voting, fix 2-minima gate, MHAOV=validator | `a9cfa68` |
+### Change 9 (LRT broken — all objects over-doubled)
+Exact dropped to 13/13. 18 false doubles. Do not use.
 
----
+### Change 10 (current — run in progress at session end)
+Early log confirms:
+- Bonferroni alpha_eff=6.58e-4 active
+- MF76 correctly NOT doubled (F=6.08, p=2.70e-3 ≥ threshold)
+- MG17, MH40, MH75 correctly doubled via spin-barrier prior
+- ME15 truth period (6.9hr) visible as rank-4 MBLS peak (6.897hr)
+- T2 top-5 MBLS peaks stored in catalog
+- Full results table pending (run was in progress at ~20% when session ended)
 
-## Validation results (Greenstreet et al. 2026, 76 objects)
+## Architecture (current)
 
-Run date: 2026-03-22. Pipeline state: post-Change-8 (MBLS-primary architecture).  
-BigQuery date range: `obstime 2025-04-21 to 2025-05-06`  
-BQ export folder: `bq-results-20260321-232234-1774135371078`
+### Tier 1
+- Hard gates: n_obs≥20, SNR≥3.0
+- Pass 1: coarse GLS 2000pts, 0.5–24hr
+- Pass 2 triggers:
+  - A: near spin barrier (<2.2hr) — Pravec & Harris 2000
+  - B: coarse FAP insignificant — Zechmeister & Kürster 2009
+  - C (Change 10): coarse MBLS band support < 0.6 — catches ultrafast aliases (MJ71/MU15 class)
+- Outputs: best GLS, best MBLS, mbls_peaks (top-5 window-penalised)
 
-| Set | Objects | Published (R≥1) | Exact (<10%) | Exact+Harmonic | Superfast |
-|-----|---------|-----------------|--------------|----------------|-----------|
-| Validation (37) | 37 | 36 (97%) | 27/37 (73%) | 28/37 (76%) | 6/9 |
-| Blind (39) | 39 | 38 (97%) | 26/39 (67%) | 28/39 (72%) | 6/8 |
+### Tier 2
+- Fine grid: 100× oversampling, p_min=min(t1_peaks)/4
+- Methods: MHAOV (adaptive NH=2-4), MBLS (Nterms=2), CE (annotation only — Rubin floor too small)
+- LRT 2-minima (Change 9+10):
+  - Nested F-test H0=nterms harmonics of P, H1=H0+sub-fundamental {cos(πt/P),sin(πt/P)}
+  - Bonferroni alpha_eff = 0.05/76 = 6.58e-4 (lrt_n_objects=76 in TierConfig)
+  - Spin-barrier prior: if P_raw>2.2hr AND MHAOV confirms P/2 → double unconditionally
+- MBLS is primary detector; MHAOV is corroboration
+- Decision paths: mbls_confirmed / mbls_sig_only / reject / Tier3
+- Outputs: top-5 MBLS peaks+powers stored in catalog (t2_mbls_top_periods, t2_mbls_top_powers)
 
-**R-code breakdown:**
+### Key files
+- src/tier1.py — Pass 1/2/3, mbls_peaks field in Tier1Result
+- src/tier2.py — LRT, SPIN_BARRIER_HR, Tier2Result with mbls_top_periods/powers
+- src/config.py — TierConfig: lrt_n_objects=76, t1_band_support_pass2_thresh=0.6
+- src/catalog.py — t2_mbls_top_periods, t2_mbls_top_powers columns
+- src/sources/greenstreet2026.py — primary + additional periods, check_against_all_periods()
+- src/reliability.py — R-codes, two alias layers
 
-| | R=3 | R=2 | R=1 | R=0 | R=-1 |
-|-|-----|-----|-----|-----|------|
-| Validation | 9 | 27 | 0 | 1 | 0 |
-| Blind | 9 | 29 | 0 | 0 | 1 |
+## Known Failure Classes (from Change 9 full run, Change 10 partial)
 
-### Change vs pre-Change-8
+### True failures (12 objects — unfixable without more data)
+- Superfast alias-dominated: MJ71 (0.031hr), MU15 (0.4hr) — Trigger C may help
+- Superfast P/2: MG56 (found 0.131hr, truth 0.3hr)
+- T1 alias lock (MBLS maximally confident in wrong period):
+  MN37, MJ23, MH40, MT24, MN7, ME15, MD38, MP21
+  Note: ME15 truth now visible as rank-4 MBLS peak (6.897hr) — diagnostic improvement
 
-| Metric | Pre-C8 | Post-C8 | Δ |
-|--------|--------|---------|---|
-| Validation exact | 20/37 (54%) | 27/37 (73%) | +7 ↑↑ |
-| Blind exact | 20/39 (51%) | 26/39 (67%) | +6 ↑↑ |
-| Published (both) | 97% | 97% | = |
+### Additional Greenstreet periods found (7 objects)
+Not real failures — pipeline found published secondary periods.
+MM82, MV31, ML10, MD67, MO39, MK68, MX69
 
-Change 8 fixed 13 objects previously wrong due to CE phantom-voting MHAOV.
-Key recoveries: MD76, MJ30, ML53, MO79, MV19, MN45, MK83, MV38, MV4, MC34.
+### Symmetric double-hump (irreducible)
+MA19: truth=8.9hr, both MBLS and MHAOV agree on 4.438hr.
+LRT F=0.03 — no asymmetry. Spin-barrier prior requires MHAOV to find P/2=2.219hr (it doesn't).
+Published as half_period. Scientifically honest — data cannot distinguish P from 2P.
 
-Match against Greenstreet primary + additional periods (Table 3):
-Validation 31/37 (84%), Blind 32/39 (82%).
+## Priority Queue (next session)
+1. **Wait for Change 10 full results** — run was in progress, need complete table
+2. **Trigger C validation** — did MJ71/MU15 get Trigger C? Check logs for "trigger=C-low_band_support"
+3. **MBLS top-5 rank analysis** — now that truth rank is stored, check T1-alias-lock cases
+4. **LCDB wiring** — wire lcdb_record into run_single_asteroid() for external cross-validation
+5. **Bonferroni for production** — set lrt_n_objects=0 when running >1000 objects (raw alpha=0.05)
+6. **Period max 48hr** — change period_max_hr from 24→48 in config.py; no validation basis yet
 
-### Known issues in the results
-
-1. **R=3 wrong answers** — MD38 (9.49hr, truth 15.8hr) and MH40 (4.84hr,
-   truth 8.0hr). Both are alias harmonics. Unfixable without LCDB wiring.
-
-2. **True failures (12):**
-   - Superfast alias harmonics (MJ71, MU15, ME68, MG56) — need ZTF/longer baseline
-   - Long-period aliases (ME15, MN7, MJ23, MN37, MP21, MT24) — alias ambiguity
-   - MN25: R=0, insufficient phase coverage
-
-3. **MN45 now correctly recovered** (truth 0.031hr, pipe 0.031hr, exact) — was
-   previously a miss. MN45 is the most extreme superfast in the dataset.
-
-4. **cadence_alias_soft flags** — provisional thresholds (0.2/0.7) pending
-   Change 3 simulation study.
-
----
-
-## What to do next (in priority order)
-
-### 0. Re-run validation after Change 8  ← DO THIS FIRST
-Change 8 redesigns core Tier 2 decision logic (MBLS-primary, CE removed from
-voting, 2-minima rule unconditional). Previous validation results (97%/97%
-published, 53%/51% exact) predate this change.
-Expected improvements: 13 objects where MBLS was correct but MHAOV+CE voted
-it down should now resolve correctly.
-
-### 1. MBLS FAP coarse/fine grid fix (documented, not yet implemented)
-The permutation test compares fine-grid observed power against coarse-grid
-null power — systematic FAP underestimate (anti-conservative). Not causing
-false positives in current data (signals are unambiguous, FAP=0.000/200).
-Fix when needed:
-- Option A: run permutations on full fine grid (exact, slow)
-- Option B: Horne & Baliunas (1986) correction — compute observed power at
-  best_mbls on coarse grid (single eval), compare against coarse null.
-  Same correction already implemented in gls_fap() for MHAOV.
-Revisit in Change 3 simulation study at varying SNR.
-
-### 2. Change 7 Phase 3 — Combined window function
-When Rubin + ZTF data are merged, compute separate window functions per
-survey and combine (product). Directly addresses alias-harmonic failures.
-Files: `src/window.py`, `src/tier1.py`, `src/tier2.py`
-Scientific basis: VanderPlas (2018) §4
-
-### 3. LCDB/DAMIT cross-check for R=3 results
-Wire `lcdb_record` into `run_single_asteroid()` to catch MD38/MH40-style
-wrong R=3 answers. `src/sources/lcdb.py` fully implemented. Just needs wiring.
-
-### 4. Change 3 simulation study
-`CONTAMINATION_THRESHOLD = 0.2` and `WINDOW_PENALTY_ALPHA = 0.7` still
-provisional. Also the correct place to validate the MBLS FAP fix above.
-
-### 5. Change 7 Phase 4 — ATLAS stub
-Requires registration at https://fallingstar-data.com/forcedphot/
-
----
-
-## Repository structure (current)
-
-```
-asteroid_pipeline/
-├── README.md
-├── SESSION_STATE.md             ← This file
-├── requirements.txt
-├── src/
-│   ├── config.py
-│   ├── ingestion.py
-│   ├── preprocessing.py
-│   ├── characterise.py
-│   ├── geometry.py
-│   ├── tier1.py
-│   ├── tier2.py
-│   ├── tier3.py
-│   ├── reliability.py
-│   ├── catalog.py
-│   ├── window.py
-│   ├── pipeline.py
-│   ├── precompute.py
-│   └── sources/
-│       ├── lcdb.py              ← LCDB lookup (fully implemented)
-│       ├── ztf.py               ← ZTF fetcher (fully implemented)
-│       ├── atlas.py             ← STUB — needs implementation
-│       ├── validation_sources.py← STUB — DAMIT + JPL SBDB lookups
-│       └── __init__.py
-├── notebooks/
-│   ├── pipeline_colab.ipynb
-│   └── validate_pipeline.ipynb
-└── tests/
-    ├── test_pipeline.py
-    ├── test_mbls_regression.py
-    └── test_change7.py
-```
-
----
-
-## How to start a new session
-
+## Colab Setup
 ```python
 import os, sys
 from google.colab import userdata
-
 GITHUB_TOKEN = userdata.get('GITHUB_TOKEN')
 REPO = '/content/asteroid-pipeline'
-
 if not os.path.exists(REPO):
     !git clone https://{GITHUB_TOKEN}@github.com/wonrobot/asteroid-pipeline.git {REPO}
 else:
     %cd {REPO}
     !git pull
-
 %cd {REPO}
 !pip install -r requirements.txt -q
-
-# Evict stale module caches
 _PIPELINE_PKGS = ['pipeline','tier1','tier2','tier3','preprocessing','characterise',
     'reliability','catalog','ingestion','window','config','precompute','geometry','sources']
 for _m in list(sys.modules.keys()):
     if any(_m == p or _m.startswith(p+'.') for p in _PIPELINE_PKGS):
         del sys.modules[_m]
-
+import subprocess
+subprocess.run(['find', REPO, '-name', '*.pyc', '-delete'], capture_output=True)
 sys.path.insert(0, f'{REPO}/src')
-print('Ready. Read SESSION_STATE.md to see where to continue from.')
+print('Ready')
 ```
 
-**Then read this file:**
-```python
-with open('/content/asteroid-pipeline/SESSION_STATE.md') as f:
-    print(f.read())
-```
-
----
-
-## Outstanding decisions needed from researcher
-
-1. **Change 3 simulation study** — needed to document `CONTAMINATION_THRESHOLD`
-   and `WINDOW_PENALTY_ALPHA` scientifically. Estimated effort: 1–2 days.
-
-2. **ZTF API** — `fetch_ztf()` works with astroquery + internet. No registration
-   needed for IRSA. Test with: `fetch_ztf("2025 MG56", date_end="2025-06-01")`
-   (known superfast miss, truth P=0.3hr).
-
-3. **ATLAS registration** — https://fallingstar-data.com/forcedphot/ (free).
-   Required before Phase 4 can be implemented.
-
-4. **LCDB wiring priority** — MD38 and MH40 are R=3 wrong answers that can only
-   be caught by external ground truth. Decision needed on whether to wire LCDB
-   before or after Change 7 Phase 3.
+## BQ Export
+bq-results-20260321-232234-1774135371078
+Drive: /content/drive/MyDrive/LSST-Claude/bq-results-20260321-232234-1774135371078/pipeline_results/
