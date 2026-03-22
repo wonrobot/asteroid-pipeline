@@ -43,6 +43,7 @@ CATALOG_COLUMNS = [
     "t2_consensus_period_hr", "t2_F_stat", "t2_p_value", "t2_mbls_fap",
     "t2_mbls_band_support_frac", "t2_mbls_n_bands_supporting",
     "t2_amplitude_mag", "t2_agreement", "t2_period_spread_pct",
+    "t2_mbls_top_periods", "t2_mbls_top_powers",
     # Tier 3
     "t3_ran", "t3_publish_tentative", "t3_needs_followup",
     "t3_adopted_period_hr", "t3_clean_period_hr",
@@ -131,6 +132,13 @@ def result_to_row(
             "t2_amplitude_mag":     t2result.amplitude,
             "t2_agreement":         t2result.agreement,
             "t2_period_spread_pct": t2result.period_spread_pct,
+            # Top-5 MBLS peaks: stored as pipe-separated strings for CSV compatibility
+            "t2_mbls_top_periods":  "|".join(
+                f"{p:.4f}" for p in getattr(t2result, "mbls_top_periods", [])
+            ),
+            "t2_mbls_top_powers":   "|".join(
+                f"{pw:.6f}" for pw in getattr(t2result, "mbls_top_powers", [])
+            ),
         })
         # If Tier 2 passed (methods agreed), set final values here
         if t2result.passes:

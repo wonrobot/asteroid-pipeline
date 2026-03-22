@@ -148,6 +148,21 @@ class TierConfig:
     # 0.05 is the conventional significance level (95% confidence).
     gls_fap_expand_thresh: float = 0.05
 
+    # ── Trigger C: low MBLS band support at T1 coarse best (Change 10) ────────
+    # If fewer than this fraction of bands support the coarse best period,
+    # the coarse result is suspect even when FAP is significant — the alias
+    # may be coherent in only one band. Trigger Pass 2 to search sub-0.5hr.
+    # Physical basis: a genuine slow rotator (P > 0.5hr) will show consistent
+    # multi-band support. An alias of an ultrafast signal may not.
+    # 0.6 = at least 2/3 bands must support; below this → expand.
+    t1_band_support_pass2_thresh: float = 0.6
+
+    # ── LRT 2-minima: Bonferroni n_objects (Change 10) ────────────────────────
+    # Number of independent tests in the pipeline run.
+    # Bonferroni alpha = 0.05 / lrt_n_objects.
+    # Set to 0 to skip Bonferroni and use raw alpha=0.05 (e.g. single objects).
+    lrt_n_objects: int = 76
+
 
 # ── Output ────────────────────────────────────────────────────────────────────
 

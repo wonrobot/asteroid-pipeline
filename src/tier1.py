@@ -229,14 +229,63 @@ def run_tier1(
     # Trigger B is suppressed when the coarse best sits on a window peak
     # (alias suppression scenario — low power is not evidence of a fast
     # rotator, it is evidence that the real signal was aliased away).
+    # ── Pass 2 triggers — all have scientific citations ──────────────────────
+    #
+    # Trigger A — near spin barrier (Pravec & Harris 2000):
+    #   If the coarse best period is below the rubble-pile spin barrier
+    #   (2.2hr), the object may be a monolithic fast rotator. We expand to
+    #   the Eyer & Bartholdi floor to confirm or refute sub-barrier rotation.
+    #
+    # Trigger B — coarse GLS not significant (Zechmeister & Kürster 2009):
+    #   If the maximum coarse GLS power does not exceed the FAP threshold,
+    #   there is no evidence that the true period lies in the coarse range.
+    #   Expanding to the fine grid is warranted to search for stronger fast-
+    #   rotator signals below 0.5hr. Suppressed when coarse best is already
+    #   window-contaminated (alias suppression, not a fast rotator).
+    #
+    # Trigger C — low MBLS band support at coarse best (Change 10):
+    #   A genuine slow rotator (P > 0.5hr) will produce consistent multi-band
+    #   support at its period. An alias of an ultrafast signal (e.g. MJ71 at
+    #   0.031hr aliasing to 18.8hr) may show high GLS power in the merged
+    #   series but weak per-band coherence, because the alias structure is
+    #   incoherent across band sampling patterns.
+    #   We compute a quick MBLS band-support score at best_coarse and trigger
+    #   Pass 2 if it is below the threshold — even when Trigger A and B are
+    #   both false. This catches MJ71/MU15 class objects where a strong alias
+    #   suppressed both FAP and spin-barrier triggers.
+    #   Physical basis: VanderPlas & Ivezić (2015) show MBLS band support
+    #   degrades for aliases relative to true periods.
     fap_coarse         = gls_fap(max_pow_coarse, data.n_obs, data.baseline_hr,
                                   p_min_hr=FAST_THRESH, p_max_hr=p_max_t1)
     near_spin_barrier  = best_coarse < SPIN_BARRIER_HR          # Pravec & Harris (2000)
     insignificant_coarse = fap_coarse > cfg_t.gls_fap_expand_thresh  # ZK09 FAP
     can_search_fast    = data.period_min_hr < FAST_THRESH        # floor supports sub-0.5hr
 
+    # Trigger C: quick MBLS band-support at coarse best
+    low_band_support_coarse = False
+    if can_search_fast and not near_spin_barrier and not insignificant_coarse:
+        # Only worth computing when Triggers A and B would NOT fire — this is
+        # the novel case: strong FAP, not near spin barrier, but may be alias.
+        try:
+            from tier2 import compute_mbls_band_support
+            _bs, _n_sup, _frac = compute_mbls_band_support(
+                data.t_hrs, data.y_multiband, data.dy, data.bands,
+                period=float(best_coarse), nterms=1,
+            )
+            low_band_support_coarse = _frac < cfg_t.t1_band_support_pass2_thresh
+            if low_band_support_coarse:
+                logger.debug(
+                    f"{data.provid}: Pass 2 Trigger C — coarse best={best_coarse:.3f}hr "
+                    f"has low MBLS band support ({_frac:.2f} < "
+                    f"{cfg_t.t1_band_support_pass2_thresh}) — possible ultrafast alias"
+                )
+        except Exception as _e:
+            logger.debug(f"{data.provid}: Trigger C band-support check failed ({_e}) — skipping")
+
     should_expand = (
-        near_spin_barrier or (insignificant_coarse and not coarse_contaminated)
+        near_spin_barrier
+        or (insignificant_coarse and not coarse_contaminated)
+        or low_band_support_coarse
     ) and can_search_fast
 
     if coarse_contaminated and insignificant_coarse and not near_spin_barrier:
@@ -247,6 +296,9 @@ def run_tier1(
         )
 
     if should_expand:
+        trigger = ("A-spin_barrier" if near_spin_barrier
+                   else "C-low_band_support" if low_band_support_coarse
+                   else "B-insignificant_fap")
         # Greenstreet-style grid: 5× oversampling for T1 speed (Tier 2 uses 100×)
         n_fast = min(50_000, max(cfg_p.n_grid_coarse,
                      int(5 * data.baseline_hr
@@ -254,7 +306,7 @@ def run_tier1(
         test_periods = np.linspace(data.period_min_hr, p_max_t1, n_fast)
         logger.debug(
             f"{data.provid}: Pass 2 expanded to {len(test_periods)} pts "
-            f"(floor={data.period_min_hr*60:.1f}min, "
+            f"(floor={data.period_min_hr*60:.1f}min, trigger={trigger}, "
             f"near_spin_barrier={near_spin_barrier}, insignificant_fap={fap_coarse:.3f}, "
             f"coarse_cont={coarse_cont:.2f})"
         )

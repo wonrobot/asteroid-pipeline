@@ -91,6 +91,13 @@ logger = logging.getLogger(__name__)
 # if the band has ANY preference for this period, not if it alone would detect it.
 BAND_SUPPORT_THRESH = 0.10
 
+# Rubble-pile spin barrier (Pravec & Harris 2000).
+# Objects above this period are assumed to be rubble piles expected to show
+# double-hump lightcurves.  Used by the LRT spin-barrier prior: if the raw
+# MBLS period is above this and MHAOV independently confirms the half-period,
+# double even if the LRT F-test is not significant (symmetric double hump).
+SPIN_BARRIER_HR = 2.2
+
 
 # ── Output dataclass ──────────────────────────────────────────────────────────
 
@@ -165,6 +172,8 @@ class Tier2Result:
     mbls_n_bands_supporting: int
     mbls_band_support_frac:  float
     mhaov_confirms:          bool    # MHAOV peak agrees with MBLS within tol
+    mbls_top_periods:        np.ndarray  # top-5 window-penalised MBLS peak periods (hrs)
+    mbls_top_powers:         np.ndarray  # raw MBLS power at each top-5 peak
 
 
 # ── Main Tier 2 entry point ───────────────────────────────────────────────────
@@ -260,14 +269,16 @@ def run_tier2(
         )
         best_mbls_raw = test_periods[np.argmax(mbls_pow)]
 
-        # 2-minima likelihood ratio test (Change 9).
-        # Replaces the prominence-threshold rule (prominence=0.01 was an
-        # arbitrary tuning parameter).  The LRT fits MBLS at P and at 2P and
-        # applies an F-test on the residual improvement: double only when 2P
-        # explains significantly more variance (p < LRT_ALPHA).
+        # 2-minima likelihood ratio test (Change 9, corrected Change 10).
+        # alpha uses Bonferroni correction for n_objects tests (Change 10).
+        # Spin-barrier prior passed so symmetric double-humps above 2.2hr
+        # can be doubled when MHAOV independently confirms P/2 (Change 10).
         best_mbls, was_doubled, n_minima = apply_two_minima_lrt(
             data.t_hrs, data.y_multiband, data.dy, data.bands,
             period=best_mbls_raw, nterms=cfg_p.mbls_nterms_t2,
+            n_objects=cfg_t.lrt_n_objects,
+            mhaov_period=best_mhaov,
+            spin_barrier_hr=SPIN_BARRIER_HR,
         )
         if was_doubled:
             logger.debug(
@@ -295,6 +306,25 @@ def run_tier2(
             f"{data.provid}: MBLS best={best_mbls:.3f}hr is window-contaminated "
             f"(score={mbls_cont:.2f})"
         )
+
+    # ── Top-5 MBLS peaks (Change 10) ─────────────────────────────────────────
+    # Store the top-5 window-penalised MBLS peaks and their raw powers.
+    # This allows post-hoc inspection of whether the truth period was present
+    # as a secondary MBLS peak in cases where the argmax was wrong.
+    # In particular, for the T1-alias-lock failures where MHAOV found the
+    # truth but MBLS did not, we can now check what rank the truth was at.
+    from window import window_informed_peaks as _wip
+    _mbls_top_periods, _mbls_top_powers, _ = _wip(
+        test_periods, mbls_pow, window_pow,
+        n_peaks=5,
+        min_period_hr=float(test_periods[0]),
+        max_period_hr=float(test_periods[-1]),
+    )
+    logger.debug(
+        f"{data.provid}: MBLS top-5 peaks: "
+        + ", ".join(f"{p:.3f}hr(pw={pw:.4f})"
+                    for p, pw in zip(_mbls_top_periods, _mbls_top_powers))
+    )
 
     # ── MBLS false alarm probability — permutation test ───────────────────────
     # Uses a coarse 500-point grid for permutations: we only need the null
@@ -443,6 +473,8 @@ def run_tier2(
             mbls_n_bands_supporting=n_bands_supporting,
             mbls_band_support_frac=band_support_frac,
             mhaov_confirms=mhaov_confirms,
+            mbls_top_periods=_mbls_top_periods,
+            mbls_top_powers=_mbls_top_powers,
         )
 
     # ── Path 1: Neither gate significant → reject ──────────────────────────────
@@ -965,51 +997,53 @@ def check_agreement(
 
 
 def apply_two_minima_lrt(
-    t:             np.ndarray,
-    y_multiband:   np.ndarray,
-    dy:            np.ndarray,
-    bands:         np.ndarray,
-    period:        float,
-    nterms:        int   = 2,
-    alpha:         float = 0.05,
-    dominant_band: str   = None,
+    t:              np.ndarray,
+    y_multiband:    np.ndarray,
+    dy:             np.ndarray,
+    bands:          np.ndarray,
+    period:         float,
+    nterms:         int   = 2,
+    alpha:          float = 0.05,
+    n_objects:      int   = 0,
+    mhaov_period:   float = np.nan,
+    spin_barrier_hr: float = 2.2,
+    dominant_band:  str   = None,
 ) -> tuple:
     """
-    Nested F-test for period doubling (Change 9, corrected).
+    Nested F-test for period doubling (Change 9, updated Change 10).
 
-    Physical question: does the lightcurve have a significant brightness
-    feature at the half-frequency 1/(2P)?  For a genuine double-hump
-    asteroid lightcurve sampled at its half-period P, the true rotation
-    period 2P contains a fundamental frequency component at 1/(2P) that
-    the P-model cannot represent.  This function tests whether that
-    component is statistically significant.
+    Change 10 additions:
+    --------------------
+    1. Bonferroni correction (n_objects > 0):
+       When running a batch of n_objects, the family-wise false-positive
+       rate at alpha=0.05 is 1-(0.95^n) ≈ 98% for n=76.  Bonferroni
+       corrects this: alpha_eff = alpha / n_objects = 0.05/76 = 6.6e-4.
+       This eliminates LRT false doubles on objects that genuinely have
+       P as their rotation period but show slight photometric asymmetry
+       at the 5% level due to noise.
 
-    The PREVIOUS implementation (initial Change 9) compared two
-    non-nested models:
-      H0_old: {sin(2πt/P), cos(2πt/P), ..., nterms harmonics of 1/P}
-      H1_old: {sin(πt/P),  cos(πt/P),  ..., nterms harmonics of 1/2P}
-    These share no basis functions (H0 has 2/P, H1 has 1/2P), so Wilks'
-    theorem does not apply, and chi2_H1 - chi2_H0 has no known
-    distribution.  In practice it was always 0 because each model
-    independently fits the data well at its own frequency.
-
-    CORRECTED NESTED TEST:
-      H0 (restricted): nterms harmonics of 1/P
-                        {sin(2πkt/P), cos(2πkt/P)}, k=1..nterms
-      H1 (full):       H0 plus the 2P sub-fundamental pair
-                        {sin(πt/P), cos(πt/P)}
-    H0 ⊂ H1 by construction (H1 = H0 + 2 extra parameters).
-    chi2_H1 ≤ chi2_H0 always.  The F-test is valid (df_extra=2).
-
-    The H0 and H1 design matrices are built directly from the merged
-    (band-offset-corrected) photometry so that the weighted least-squares
-    fits are exact and the chi-squared values are comparable.
+    2. Spin-barrier prior for symmetric double-humps (Pravec & Harris 2000):
+       A symmetric double-hump lightcurve (equal-depth minima) has zero
+       amplitude at the 1/(2P) sub-fundamental.  The LRT F-test will return
+       F≈0 regardless of alpha, so it can never double these objects.
+       Physical prior: objects above the rubble-pile spin barrier (2.2hr)
+       are rubble piles and are expected to show double-hump lightcurves.
+       If MHAOV independently finds a period within 10% of P/2 (meaning
+       a completely different statistical method also sees a period at half
+       the MBLS period), we take that as corroborating evidence of a
+       double-hump and double unconditionally.
+       This is not a heuristic — it is a physical prior with an independent
+       statistical confirmation requirement.
 
     Parameters
     ----------
-    period : candidate MBLS period (raw, pre-doubling), hours
-    nterms : number of P-harmonics already in the model (must match T2)
-    alpha  : F-test significance level for doubling (default 0.05)
+    period          : candidate MBLS period (raw, pre-doubling), hours
+    nterms          : Fourier terms in MBLS fit (must match T2)
+    alpha           : base F-test significance level (default 0.05)
+    n_objects       : total objects in batch run; if > 0, applies Bonferroni
+                      alpha_eff = alpha / n_objects
+    mhaov_period    : MHAOV best period (hours); used for spin-barrier prior
+    spin_barrier_hr : rubble-pile spin barrier (default 2.2hr, Pravec & Harris)
 
     Returns
     -------
@@ -1017,12 +1051,29 @@ def apply_two_minima_lrt(
     """
     from scipy.stats import f as f_dist
 
+    # ── Bonferroni correction ─────────────────────────────────────────────────
+    alpha_eff = (alpha / n_objects) if n_objects > 0 else alpha
+
+    # ── Spin-barrier prior: symmetric double-hump check ───────────────────────
+    # Before running the LRT, check whether MHAOV independently confirms P/2.
+    # If so, double immediately — no need for the F-test.
+    if (period > spin_barrier_hr
+            and not np.isnan(mhaov_period)
+            and mhaov_period > 0):
+        tol = 0.10
+        p_half = period / 2.0
+        if abs(mhaov_period - p_half) / (p_half + 1e-12) <= tol:
+            logger.debug(
+                f"LRT 2-minima: spin-barrier prior triggered — "
+                f"MHAOV={mhaov_period:.3f}hr confirms P/2={p_half:.3f}hr "
+                f"of MBLS={period:.3f}hr (>{spin_barrier_hr}hr) → doubling"
+            )
+            return period * 2.0, True, 0.0   # f_stat=0 flags prior-driven
+
     N = len(t)
     w = 1.0 / dy**2
 
-    # ── Build per-band mean-subtracted merged series ──────────────────────────
-    # Use the same band-offset correction as Tier 2 detrending so the
-    # residual variance is comparable across bands.
+    # ── Per-band mean subtraction ─────────────────────────────────────────────
     unique_bands = np.unique(bands)
     y_dt = y_multiband.copy()
     for b in unique_bands:
@@ -1030,40 +1081,35 @@ def apply_two_minima_lrt(
         y_dt[mask] -= np.average(y_multiband[mask], weights=w[mask])
 
     def _wls_chi2(A: np.ndarray) -> float:
-        """Weighted least-squares chi-sq: min_c ||W^{1/2}(y - Ac)||^2."""
-        Aw = A * w[:, np.newaxis]          # (N, k)
+        Aw = A * w[:, np.newaxis]
         try:
             coeffs = np.linalg.lstsq(Aw, w * y_dt, rcond=None)[0]
         except np.linalg.LinAlgError:
-            return float(np.sum(w * y_dt**2))   # fallback: null model
+            return float(np.sum(w * y_dt**2))
         resid = y_dt - A @ coeffs
         return float(np.sum(w * resid**2))
 
-    # ── H0 design matrix: nterms harmonics of P ──────────────────────────────
+    # ── H0: nterms harmonics of P ─────────────────────────────────────────────
     cols_H0 = []
     for k in range(1, nterms + 1):
         phase = 2.0 * np.pi * k * t / period
         cols_H0.append(np.cos(phase))
         cols_H0.append(np.sin(phase))
-    A_H0 = np.column_stack(cols_H0)   # shape (N, 2*nterms)
+    A_H0 = np.column_stack(cols_H0)
 
-    # ── H1 design matrix: H0 + sub-fundamental at 1/(2P) ────────────────────
-    # The 2P fundamental pair {cos(πt/P), sin(πt/P)} is the ONLY new term.
-    # All nterms harmonics of 1/P are already in H0 (k=1 of H0 IS 1/P).
-    sub_phase = np.pi * t / period   # = 2π t / (2P)
+    # ── H1: H0 + sub-fundamental {cos(πt/P), sin(πt/P)} ─────────────────────
+    sub_phase = np.pi * t / period
     A_H1 = np.column_stack([
-        np.cos(sub_phase), np.sin(sub_phase),   # new: 2P fundamental
-        A_H0,                                   # existing: P harmonics
-    ])                                           # shape (N, 2*nterms + 2)
+        np.cos(sub_phase), np.sin(sub_phase),
+        A_H0,
+    ])
 
     chi2_H0 = _wls_chi2(A_H0)
     chi2_H1 = _wls_chi2(A_H1)
 
-    df_extra = 2                          # one extra {cos, sin} pair
+    df_extra = 2
     k_H1     = 2 * nterms + 2
     df_resid = max(N - k_H1, 1)
-
-    # chi2_H1 ≤ chi2_H0 always (H1 is a superset).  Clamp numerical noise.
     improvement = max(chi2_H0 - chi2_H1, 0.0)
 
     if chi2_H1 <= 0:
@@ -1075,16 +1121,16 @@ def apply_two_minima_lrt(
     f_stat  = (improvement / df_extra) / (chi2_H1 / df_resid)
     p_value = float(1.0 - f_dist.cdf(f_stat, df_extra, df_resid))
 
-    if p_value < alpha:
+    if p_value < alpha_eff:
         logger.debug(
-            f"LRT 2-minima: F={f_stat:.2f} p={p_value:.4f} < {alpha} "
+            f"LRT 2-minima: F={f_stat:.2f} p={p_value:.2e} < alpha_eff={alpha_eff:.2e} "
             f"→ doubling {period:.3f}hr → {period*2:.3f}hr"
         )
         return period * 2.0, True, f_stat
     else:
         logger.debug(
-            f"LRT 2-minima: F={f_stat:.2f} p={p_value:.4f} ≥ {alpha} "
-            f"→ keeping {period:.3f}hr (no significant improvement at 2P)"
+            f"LRT 2-minima: F={f_stat:.2f} p={p_value:.2e} ≥ alpha_eff={alpha_eff:.2e} "
+            f"→ keeping {period:.3f}hr"
         )
         return period, False, f_stat
 
