@@ -586,31 +586,35 @@ class TestPass2Suppression:
         t1 = run_tier1(data, DEFAULT_CONFIG)
         assert hasattr(t1, 'passes')
 
-    def test_contaminated_weak_power_suppresses_expansion(self):
+    def test_contaminated_insignificant_suppresses_expansion(self):
         """
-        When coarse best period is window-contaminated AND power is weak,
-        Pass 2 should NOT expand. Verify by checking the suppression log path
-        exists in source (logic test) and that Tier1Result is still valid.
+        When coarse best period is window-contaminated AND coarse GLS FAP is
+        high (insignificant), Pass 2 should NOT expand — low power from alias
+        suppression is not evidence of a fast rotator.
+        Verify the suppression condition exists in source.
         """
-        import ast
         with open('src/tier1.py') as f:
             src = f.read()
         assert 'Pass 2 suppressed' in src, \
             "Suppression log message missing from tier1.py"
-        assert 'coarse_contaminated and weak_power and not near_boundary' in src, \
+        assert 'coarse_contaminated and insignificant_coarse and not near_spin_barrier' in src, \
             "Suppression condition missing from tier1.py"
 
-    def test_near_boundary_always_expands(self):
+    def test_near_spin_barrier_always_expands(self):
         """
-        near_boundary trigger should expand even if coarse best is contaminated —
-        harmonic concern (P/2 at boundary) is independent of alias risk.
+        near_spin_barrier trigger should expand even if coarse best is
+        contaminated — a period below the 2.2hr spin barrier (Pravec &
+        Harris 2000) warrants fine-grid confirmation regardless of alias risk.
         """
         with open('src/tier1.py') as f:
             src = f.read()
-        # The should_expand condition should include near_boundary without
-        # a contamination check
-        assert 'near_boundary or (weak_power and not coarse_contaminated)' in src, \
-            "near_boundary should expand regardless of contamination"
+        # should_expand must include near_spin_barrier without contamination check
+        assert 'near_spin_barrier or (insignificant_coarse and not coarse_contaminated)' in src, \
+            "near_spin_barrier should expand regardless of contamination (Pravec & Harris 2000)"
+        assert 'SPIN_BARRIER_HR' in src, \
+            "SPIN_BARRIER_HR constant missing from tier1.py"
+        assert '2.2' in src, \
+            "Spin barrier value 2.2hr missing from tier1.py"
 
     def test_window_reused_when_no_expansion(self):
         """
@@ -621,6 +625,10 @@ class TestPass2Suppression:
             src = f.read()
         assert 'window_pow = window_pow_coarse' in src, \
             "Window reuse path missing — redundant recomputation on non-expanded grid"
+        # Verify the new scientific trigger variable names are present
+        assert 'near_spin_barrier' in src, "near_spin_barrier variable missing"
+        assert 'insignificant_coarse' in src, "insignificant_coarse variable missing"
+        assert 'gls_fap' in src, "gls_fap function call missing"
 
     def test_window_recomputed_when_expanded(self):
         """When grid expands, window must be recomputed on the new larger grid."""

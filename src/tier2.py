@@ -224,7 +224,8 @@ def run_tier2(
     p_value  = float(1.0 - f_dist.cdf(F_best, df_model, max(df_resid, 1)))
 
     # Score MHAOV best period for window contamination
-    mhaov_cont = contamination_score(best_mhaov, test_periods, window_pow)
+    mhaov_cont = contamination_score(best_mhaov, test_periods, window_pow,
+                                   baseline_hr=data.baseline_hr)
     if mhaov_cont > CONTAMINATION_THRESHOLD:
         logger.warning(
             f"{data.provid}: MHAOV best={best_mhaov:.3f}hr is window-contaminated "
@@ -280,7 +281,8 @@ def run_tier2(
         best_mbls     = best_mhaov
 
     # Score MBLS best period
-    mbls_cont = contamination_score(float(best_mbls), test_periods, window_pow)
+    mbls_cont = contamination_score(float(best_mbls), test_periods, window_pow,
+                                  baseline_hr=data.baseline_hr)
     if mbls_cont > CONTAMINATION_THRESHOLD:
         logger.warning(
             f"{data.provid}: MBLS best={best_mbls:.3f}hr is window-contaminated "
@@ -338,7 +340,8 @@ def run_tier2(
         best_ce = ce_periods[np.argmin(ce_scores)]
 
     # Score CE best period
-    ce_cont = contamination_score(float(best_ce), test_periods, window_pow)
+    ce_cont = contamination_score(float(best_ce), test_periods, window_pow,
+                                baseline_hr=data.baseline_hr)
     if ce_cont > CONTAMINATION_THRESHOLD and not ce_skip:
         logger.warning(
             f"{data.provid}: CE best={best_ce:.3f}hr is window-contaminated "
@@ -384,7 +387,8 @@ def run_tier2(
             fallback=float(np.median([best_mhaov, best_mbls, best_ce])),
         )
 
-    consensus_cont = contamination_score(consensus, test_periods, window_pow)
+    consensus_cont = contamination_score(consensus, test_periods, window_pow,
+                                   baseline_hr=data.baseline_hr)
 
     logger.debug(
         f"{data.provid} Tier2: MHAOV={best_mhaov:.3f}hr (cont={mhaov_cont:.2f})  "
@@ -402,7 +406,8 @@ def run_tier2(
 
     def _make_result(passes, to_tier3, agreement_val, reject_reason=None, consensus_p=None):
         cp = consensus_p if consensus_p is not None else consensus
-        cp_cont = contamination_score(cp, test_periods, window_pow) if not np.isnan(cp) else np.nan
+        cp_cont = contamination_score(cp, test_periods, window_pow,
+                                             baseline_hr=data.baseline_hr) if not np.isnan(cp) else np.nan
         return Tier2Result(
             provid=data.provid, passes=passes, to_tier3=to_tier3,
             best_period_mhaov=best_mhaov,

@@ -211,8 +211,11 @@ def compute_reliability(
     # Uses the actual window function computed from this asteroid's observation
     # timestamps — catches scheduling gaps and moon avoidance windows that the
     # fixed daily/annual list misses entirely.
+    # baseline_hr from char.baseline_days × 24 — enables Rayleigh-criterion
+    # radius in contamination_score (Change 3).
+    char_baseline_hr = getattr(char, 'baseline_days', 0.0) * 24.0
     window_alias_risk, window_alias_note = flag_window_alias(
-        adopted_period, t1result
+        adopted_period, t1result, baseline_hr=char_baseline_hr
     )
 
     # Combined alias flag
@@ -577,9 +580,10 @@ def flag_alias_risk(
 # ── Layer 2: Cadence-specific window alias check ──────────────────────────────
 
 def flag_window_alias(
-    period_hr: float,
+    period_hr:   float,
     t1result,
-    threshold: float = WINDOW_ALIAS_THRESHOLD,
+    baseline_hr: float = 0.0,
+    threshold:   float = WINDOW_ALIAS_THRESHOLD,
 ) -> tuple:
     """
     Check if a period sits on a peak in the spectral window function —
@@ -612,7 +616,12 @@ def flag_window_alias(
         return False, ""
 
     from window import contamination_score
-    score = contamination_score(period_hr, t1result.test_periods, t1result.window_power)
+    score = contamination_score(
+        period_hr,
+        t1result.test_periods,
+        t1result.window_power,
+        baseline_hr=baseline_hr,
+    )
 
     if score > threshold:
         return True, (

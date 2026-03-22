@@ -108,15 +108,33 @@ def contamination_score(
     period_hr: float,
     periods_grid: np.ndarray,
     window_power: np.ndarray,
+    baseline_hr: float = 0.0,
 ) -> float:
     """
     Return the window contamination score for a candidate period.
 
-    Score = max window power within ±CONTAMINATION_RADIUS of the period,
-    normalised to max window power overall.
+    Score = max window power within the Rayleigh resolution radius of the
+    candidate period, normalised to the global maximum window power.
 
     Score = 0.0 → period is in a window-clean region (trustworthy)
     Score = 1.0 → period sits exactly on a window peak (likely alias)
+
+    Radius derivation (Rayleigh criterion)
+    --------------------------------------
+    The frequency resolution of a dataset with baseline T hours is:
+        δf = 1/T  cycles/hour
+    (Rayleigh 1879; Scargle 1982 §II; VanderPlas 2018 PASP 130 §3.1)
+
+    The corresponding period resolution at period P hours:
+        δP = P² × δf = P²/T  hours
+
+    This is the minimum separation at which two window peaks can be
+    resolved. Using δP as the search radius captures the full main lobe
+    of a window peak centred at P without leaking into adjacent peaks.
+
+    When baseline_hr is not provided the legacy fixed-fraction fallback
+    (CONTAMINATION_RADIUS = 0.03) is used. Callers should always supply
+    baseline_hr when it is available.
 
     Parameters
     ----------
@@ -126,13 +144,26 @@ def contamination_score(
         Period grid used for window computation.
     window_power : np.ndarray
         Window function power on periods_grid.
+    baseline_hr : float, optional
+        Observing baseline in hours. When provided, uses the Rayleigh
+        criterion δP = P²/T. When zero (default), falls back to the
+        fixed fractional radius CONTAMINATION_RADIUS × P.
 
     Returns
     -------
     float in [0, 1]
     """
-    radius  = CONTAMINATION_RADIUS * period_hr
-    mask    = np.abs(periods_grid - period_hr) <= radius
+    if baseline_hr > 0:
+        # Rayleigh criterion: δP = P²/T  (Scargle 1982, VanderPlas 2018)
+        rayleigh_radius = period_hr ** 2 / baseline_hr
+        # Minimum of 1 grid step to guarantee at least one point in mask
+        grid_step = float(np.median(np.abs(np.diff(periods_grid)))) if len(periods_grid) > 1 else 0.0
+        radius = max(rayleigh_radius, grid_step)
+    else:
+        # Legacy fallback (fixed fractional radius)
+        radius = CONTAMINATION_RADIUS * period_hr
+
+    mask = np.abs(periods_grid - period_hr) <= radius
     if not mask.any():
         return 0.0
 

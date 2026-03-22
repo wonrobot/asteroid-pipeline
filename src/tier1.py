@@ -42,6 +42,54 @@ from window import (
 
 logger = logging.getLogger(__name__)
 
+# ── GLS false alarm probability (Zechmeister & Kürster 2009) ─────────────────
+# Spin barrier for gravitationally bound (rubble-pile) asteroids.
+# Asteroids larger than ~150m rotating faster than this would disrupt.
+# Citation: Pravec & Harris (2000), Icarus 148, 12–20; Holsapple (2007).
+SPIN_BARRIER_HR = 2.2
+
+def gls_fap(
+    power_max:   float,
+    n_obs:       int,
+    baseline_hr: float,
+    p_min_hr:    float = 0.5,
+    p_max_hr:    float = 24.0,
+) -> float:
+    """
+    Analytical false alarm probability for the maximum GLS power on a grid.
+
+    Uses the Zechmeister & Kürster (2009) single-frequency tail probability:
+        P(z > z₀ | H₀) = (1 - z₀)^((N-3)/2)    [ZK09 Eq. 13]
+
+    Combined over M independent frequencies (Horne & Baliunas 1986):
+        FAP = 1 - (1 - p_single)^M
+        M ≈ T_baseline × (f_max - f_min)
+
+    Parameters
+    ----------
+    power_max   : maximum GLS power ∈ [0, 1]
+    n_obs       : number of observations
+    baseline_hr : observing baseline in hours
+    p_min_hr    : lower period bound of search grid (hours)
+    p_max_hr    : upper period bound of search grid (hours)
+
+    Returns
+    -------
+    FAP ∈ [0, 1]. Low FAP → signal is significant → coarse grid is reliable.
+    High FAP → signal is not significant → expand to fine grid warranted.
+    """
+    df_resid = max(n_obs - 3, 1)
+    p_single = float((1.0 - power_max) ** (df_resid / 2.0))
+
+    # Number of independent frequencies (Horne & Baliunas 1986)
+    f_max = 1.0 / max(p_min_hr, 1e-6)
+    f_min = 1.0 / max(p_max_hr, 1e-6)
+    M     = max(1.0, baseline_hr * (f_max - f_min))
+
+    fap = 1.0 - (1.0 - p_single) ** M
+    return float(np.clip(fap, 0.0, 1.0))
+
+
 
 # ── Output dataclass ──────────────────────────────────────────────────────────
 
@@ -138,9 +186,9 @@ def run_tier1(
     #           n = 5 × T × (1/P_min − 1/P_max)   [5× for T1 speed]
     #         Tier 2 uses 100× for full precision.
     p_max_t1    = min(cfg_p.period_max_hr, data.baseline_hr)
-    FAST_THRESH = 0.5  # hr — coarse search floor
+    FAST_THRESH = 0.5  # hr — coarse grid lower bound (sub-0.5hr needs fine grid)
 
-    # Pass 1: coarse grid from 0.5hr
+    # ── Pass 1: coarse grid from 0.5hr ───────────────────────────────────────
     p_min_coarse    = max(data.period_min_hr, FAST_THRESH)
     test_periods    = np.linspace(p_min_coarse, p_max_t1, cfg_p.n_grid_coarse)
     gls_pow_coarse  = gls_periodogram(data.t_hrs, data.y_dt, data.dy, test_periods)
@@ -149,19 +197,43 @@ def run_tier1(
 
     # Window function on coarse grid — qualifies Pass 2 trigger
     window_pow_coarse   = compute_window_function(data.t_hrs, test_periods)
-    coarse_cont         = contamination_score(best_coarse, test_periods, window_pow_coarse)
+    coarse_cont         = contamination_score(
+        best_coarse, test_periods, window_pow_coarse,
+        baseline_hr=data.baseline_hr,
+    )
     coarse_contaminated = coarse_cont > CONTAMINATION_THRESHOLD
 
-    near_boundary   = best_coarse < FAST_THRESH * 1.5    # period near 0.5hr boundary
-    weak_power      = max_pow_coarse < 0.15               # low coarse power
-    can_search_fast = data.period_min_hr < FAST_THRESH    # floor supports sub-0.5hr
+    # ── Pass 2 triggers — both have scientific citations ─────────────────────
+    #
+    # Trigger A — near spin barrier (Pravec & Harris 2000):
+    #   If the coarse best period is below the rubble-pile spin barrier
+    #   (2.2hr), the object may be a monolithic fast rotator. We expand to
+    #   the Eyer & Bartholdi floor to confirm or refute sub-barrier rotation.
+    #   The old threshold (FAST_THRESH × 1.5 = 0.75hr) was purely geometric
+    #   (1.5× the grid floor) with no physical motivation.
+    #
+    # Trigger B — coarse GLS not significant (Zechmeister & Kürster 2009):
+    #   If the maximum coarse GLS power does not exceed the FAP threshold,
+    #   there is no evidence that the true period lies in the coarse range.
+    #   Expanding to the fine grid is warranted to search for stronger fast-
+    #   rotator signals below 0.5hr. The old threshold (power < 0.15) was
+    #   a fixed scalar independent of N and baseline, giving FAP values that
+    #   ranged from ~0.001 (N=150) to ~0.9 (N=30) — not a stable criterion.
+    #
+    # Trigger B is suppressed when the coarse best sits on a window peak
+    # (alias suppression scenario — low power is not evidence of a fast
+    # rotator, it is evidence that the real signal was aliased away).
+    fap_coarse         = gls_fap(max_pow_coarse, data.n_obs, data.baseline_hr,
+                                  p_min_hr=FAST_THRESH, p_max_hr=p_max_t1)
+    near_spin_barrier  = best_coarse < SPIN_BARRIER_HR          # Pravec & Harris (2000)
+    insignificant_coarse = fap_coarse > cfg_t.gls_fap_expand_thresh  # ZK09 FAP
+    can_search_fast    = data.period_min_hr < FAST_THRESH        # floor supports sub-0.5hr
 
-    # Pass 2: expand grid to Eyer & Bartholdi floor
-    # near_boundary always expands (harmonic concern, alias-independent).
-    # weak_power only expands if coarse best is not a known alias peak.
-    should_expand = (near_boundary or (weak_power and not coarse_contaminated))                     and can_search_fast
+    should_expand = (
+        near_spin_barrier or (insignificant_coarse and not coarse_contaminated)
+    ) and can_search_fast
 
-    if coarse_contaminated and weak_power and not near_boundary:
+    if coarse_contaminated and insignificant_coarse and not near_spin_barrier:
         logger.debug(
             f"{data.provid}: Pass 2 suppressed — coarse best={best_coarse:.3f}hr "
             f"is window-contaminated (cont={coarse_cont:.2f}); "
@@ -177,7 +249,7 @@ def run_tier1(
         logger.debug(
             f"{data.provid}: Pass 2 expanded to {len(test_periods)} pts "
             f"(floor={data.period_min_hr*60:.1f}min, "
-            f"near_boundary={near_boundary}, weak={weak_power}, "
+            f"near_spin_barrier={near_spin_barrier}, insignificant_fap={fap_coarse:.3f}, "
             f"coarse_cont={coarse_cont:.2f})"
         )
     # else: keep coarse test_periods — normal rotator or alias-suppressed
@@ -208,7 +280,8 @@ def run_tier1(
     )
     best_gls     = float(gls_peaks[0]) if len(gls_peaks) > 0 else test_periods[np.argmax(gls_pow)]
     gls_raw_best = float(test_periods[np.argmax(gls_pow)])
-    gls_cont     = contamination_score(best_gls, test_periods, window_pow)
+    gls_cont     = contamination_score(best_gls, test_periods, window_pow,
+                                   baseline_hr=data.baseline_hr)
 
     if best_gls != gls_raw_best:
         logger.debug(
@@ -234,7 +307,8 @@ def run_tier1(
         best_mbls = best_gls
 
     # Score MBLS best period for window contamination
-    mbls_cont = contamination_score(float(best_mbls), test_periods, window_pow)
+    mbls_cont = contamination_score(float(best_mbls), test_periods, window_pow,
+                                baseline_hr=data.baseline_hr)
 
     if mbls_cont > CONTAMINATION_THRESHOLD:
         logger.debug(

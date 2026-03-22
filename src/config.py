@@ -132,6 +132,22 @@ class TierConfig:
     mbls_fap_thresh:    float = 0.001
     mbls_fap_n_perm:    int   = 200
 
+    # ── Pass 2 expansion gate: GLS FAP threshold (Change 3) ──────────────────
+    # Pass 2 of Tier 1 expands the period grid to the Eyer & Bartholdi floor
+    # (~0.023hr for Rubin) when the coarse GLS result is not significant.
+    # Previously this used a fixed power threshold of 0.15 (arbitrary).
+    # Now uses the analytical GLS false alarm probability (Zechmeister &
+    # Kürster 2009, A&A 496, 577, Eq. 13; Horne & Baliunas 1986 for M):
+    #
+    #   FAP = 1 - (1 - (1 - power)^((N-3)/2))^M
+    #   M ≈ T_baseline × (f_max - f_min)  [independent frequencies]
+    #
+    # A coarse FAP above this threshold means the coarse-grid peak is not
+    # significant: there is no evidence that the true period lies in the
+    # coarse range, so expanding to the fine grid is warranted.
+    # 0.05 is the conventional significance level (95% confidence).
+    gls_fap_expand_thresh: float = 0.05
+
 
 # ── Output ────────────────────────────────────────────────────────────────────
 

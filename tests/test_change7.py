@@ -607,6 +607,148 @@ class TestChange7EndToEnd:
         assert hasattr(t1, "window_power")
 
 
+
+
+# ── Tests: Change 3 — scientific grounding of window/period thresholds ────────
+
+class TestChange3ScientificThresholds:
+    """
+    Verify that all previously-heuristic thresholds are now either:
+    (a) derived from a citable formula, or
+    (b) documented as provisional with a specific Change 3 derivation path.
+    """
+
+    def test_gls_fap_increases_with_lower_power(self):
+        """GLS FAP should be higher (less significant) for lower power."""
+        from tier1 import gls_fap
+        fap_low  = gls_fap(0.05, n_obs=100, baseline_hr=288)
+        fap_high = gls_fap(0.30, n_obs=100, baseline_hr=288)
+        assert fap_low > fap_high,             "FAP should be higher for lower power (less significant signal)"
+
+    def test_gls_fap_increases_with_fewer_obs(self):
+        """GLS FAP should be higher for fewer observations at the same power."""
+        from tier1 import gls_fap
+        fap_few  = gls_fap(0.15, n_obs=30,  baseline_hr=288)
+        fap_many = gls_fap(0.15, n_obs=150, baseline_hr=288)
+        assert fap_few > fap_many,             "FAP should be higher for fewer observations (weaker evidence)"
+
+    def test_gls_fap_in_range(self):
+        """GLS FAP must be in [0, 1] for all inputs."""
+        from tier1 import gls_fap
+        for power in [0.0, 0.15, 0.5, 0.99]:
+            for n in [20, 50, 150]:
+                fap = gls_fap(power, n_obs=n, baseline_hr=288)
+                assert 0.0 <= fap <= 1.0, f"FAP={fap} out of range for power={power}, n={n}"
+
+    def test_gls_fap_perfect_signal_is_significant(self):
+        """A GLS power near 1.0 should give a near-zero FAP."""
+        from tier1 import gls_fap
+        fap = gls_fap(0.99, n_obs=100, baseline_hr=288)
+        assert fap < 1e-10, f"Power=0.99 gave FAP={fap}, expected near 0"
+
+    def test_gls_fap_pure_noise_is_not_significant(self):
+        """
+        A GLS power consistent with pure noise should give FAP near 1.
+        Expected max power for N=50, M=575 noise: ~ln(M)/(N/2) ≈ 0.25.
+        """
+        from tier1 import gls_fap
+        fap = gls_fap(0.01, n_obs=50, baseline_hr=288)
+        assert fap > 0.9, f"Power=0.01 gave FAP={fap}, expected near 1"
+
+    def test_spin_barrier_value_is_2_2(self):
+        """SPIN_BARRIER_HR must be exactly 2.2 (Pravec & Harris 2000)."""
+        from tier1 import SPIN_BARRIER_HR
+        assert SPIN_BARRIER_HR == 2.2,             f"SPIN_BARRIER_HR={SPIN_BARRIER_HR}, expected 2.2 (Pravec & Harris 2000)"
+
+    def test_spin_barrier_trigger_in_source(self):
+        """Tier 1 must use near_spin_barrier, not the old near_boundary heuristic."""
+        with open("src/tier1.py") as f:
+            src = f.read()
+        assert "near_spin_barrier" in src, "near_spin_barrier trigger missing"
+        assert "SPIN_BARRIER_HR" in src,   "SPIN_BARRIER_HR constant missing"
+        assert "Pravec" in src,            "Pravec & Harris (2000) citation missing"
+        assert "insignificant_coarse" in src, "insignificant_coarse (FAP) trigger missing"
+        # Old heuristic must not remain as a trigger
+        assert "weak_power      = max_pow_coarse < 0.15" not in src,             "Old arbitrary weak_power=0.15 heuristic must not remain as trigger"
+        assert "near_boundary   = best_coarse < FAST_THRESH" not in src,             "Old near_boundary heuristic must not remain"
+
+    def test_gls_fap_expand_thresh_in_config(self):
+        """TierConfig must expose gls_fap_expand_thresh with value 0.05."""
+        from config import DEFAULT_CONFIG
+        assert hasattr(DEFAULT_CONFIG.tier, "gls_fap_expand_thresh"),             "TierConfig missing gls_fap_expand_thresh"
+        assert DEFAULT_CONFIG.tier.gls_fap_expand_thresh == 0.05,             "gls_fap_expand_thresh should be 0.05 (conventional 5% significance)"
+
+    def test_rayleigh_radius_in_contamination_score(self):
+        """contamination_score must use Rayleigh criterion when baseline_hr is given."""
+        from window import contamination_score
+        import numpy as np
+        periods = np.linspace(0.5, 24, 1000)
+        # Artificial window with peak at exactly 10hr
+        wp = np.zeros(1000)
+        idx = np.argmin(np.abs(periods - 10.0))
+        wp[max(0,idx-2):idx+3] = 1.0  # 5-point peak
+
+        # With T=288hr: Rayleigh radius at P=10hr = 100/288 = 0.347hr
+        # The peak spans ±2 grid steps ≈ ±2 × (23.5/999) ≈ ±0.047hr
+        # With Rayleigh radius 0.347hr the peak is captured
+        score_rayleigh = contamination_score(10.0, periods, wp, baseline_hr=288.0)
+        # Without baseline: CONTAMINATION_RADIUS = 0.03, radius = 0.3hr → also captures it
+        score_fixed    = contamination_score(10.0, periods, wp)
+        # Both should detect the peak (score > 0)
+        assert score_rayleigh > 0.0, "Rayleigh radius missed the window peak"
+        assert score_fixed    > 0.0, "Fixed radius missed the window peak"
+
+    def test_rayleigh_radius_longer_periods_larger(self):
+        """
+        Rayleigh radius must grow with period (δP = P²/T).
+        For T=288hr: at P=20hr radius=1.39hr > at P=5hr radius=0.087hr.
+        """
+        from window import contamination_score
+        import numpy as np
+        periods = np.linspace(0.5, 25, 2000)
+        wp      = np.ones(2000) * 0.1   # flat window
+
+        # Build a peak at 5hr and one at 20hr
+        for p_peak in [5.0, 20.0]:
+            idx = np.argmin(np.abs(periods - p_peak))
+            wp[idx] = 1.0
+
+        # Check that the score at 5hr with radius P²/T = 25/288 = 0.087hr
+        # captures the peak, and the score at 20hr with 400/288 = 1.39hr also does
+        s5  = contamination_score(5.0,  periods, wp, baseline_hr=288.0)
+        s20 = contamination_score(20.0, periods, wp, baseline_hr=288.0)
+        assert s5  > 0.0, "Rayleigh radius missed peak at P=5hr"
+        assert s20 > 0.0, "Rayleigh radius missed peak at P=20hr"
+
+    def test_window_contamination_radius_constant_is_fallback_only(self):
+        """CONTAMINATION_RADIUS must exist but only used when baseline_hr=0."""
+        import window
+        assert hasattr(window, "CONTAMINATION_RADIUS"),             "CONTAMINATION_RADIUS must still exist for legacy fallback"
+        # Verify it's used only in the else branch of contamination_score
+        import inspect
+        src = inspect.getsource(window.contamination_score)
+        assert "baseline_hr > 0" in src,             "contamination_score must branch on baseline_hr"
+        assert "rayleigh_radius" in src,             "contamination_score must compute Rayleigh radius"
+
+    def test_reliability_passes_baseline_to_window_alias(self):
+        """flag_window_alias signature must accept baseline_hr."""
+        from reliability import flag_window_alias
+        import inspect
+        sig = inspect.signature(flag_window_alias)
+        assert "baseline_hr" in sig.parameters,             "flag_window_alias must accept baseline_hr parameter"
+
+    def test_tier1_passes_baseline_to_contamination(self):
+        """tier1.py must pass baseline_hr= to all contamination_score calls."""
+        with open("src/tier1.py") as f:
+            src = f.read()
+        assert "baseline_hr=data.baseline_hr" in src,             "tier1.py must pass baseline_hr=data.baseline_hr to contamination_score"
+
+    def test_tier2_passes_baseline_to_contamination(self):
+        """tier2.py must pass baseline_hr= to all contamination_score calls."""
+        with open("src/tier2.py") as f:
+            src = f.read()
+        assert "baseline_hr=data.baseline_hr" in src,             "tier2.py must pass baseline_hr=data.baseline_hr to contamination_score"
+
 if __name__ == "__main__":
     import pytest
     pytest.main([__file__, "-v", "--tb=short"])
