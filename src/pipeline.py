@@ -226,8 +226,18 @@ def run_pipeline(
             if row.get("reliability") == "followup_needed": n_followup += 1
             if row.get("n_sources", 1) > 1:              n_ztf_augmented += 1
 
-        except KeyError:
-            logger.warning(f"Asteroid '{provid}' not found in dataset — skipping")
+        except KeyError as e:
+            # Only the "not found in dataset" KeyError from load_single_object
+            # should be silently skipped. Any other KeyError (e.g. a missing
+            # DataFrame column inside run_single_asteroid) must log a full
+            # traceback so it is immediately visible and fixable.
+            if "not found in dataset" in str(e):
+                logger.warning(f"Asteroid '{provid}' not found in dataset — skipping")
+            else:
+                logger.error(
+                    f"Unexpected KeyError processing '{provid}': {e}\n"
+                    + traceback.format_exc()
+                )
             n_error += 1
         except Exception as e:
             logger.error(f"Error processing '{provid}': {e}")
