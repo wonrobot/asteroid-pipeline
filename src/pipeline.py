@@ -52,6 +52,7 @@ from tier2 import run_tier2
 from tier3 import run_tier3
 from characterise import characterise, DataCharacterisation
 from precompute import save_all as _precompute_save_all
+from sources.lcdb import load_lcdb, lookup_batch
 from reliability import compute_reliability
 from catalog import (
     init_catalog, result_to_row, append_result,
@@ -66,23 +67,57 @@ logger = logging.getLogger(__name__)
 
 # ── Multiprocessing support ───────────────────────────────────────────────────
 # Worker state is stored in globals to avoid pickling df on every call.
-_worker_df     = None
-_worker_config = None
+_worker_df           = None
+_worker_config       = None
+_worker_lcdb_records = None   # dict {provid: LCDBRecord} pre-computed in main process
 
-def _worker_init(df_shared, config_shared):
+def _worker_init(df_shared, config_shared, lcdb_records_shared):
     """Initialise per-worker globals (called once per worker process)."""
-    global _worker_df, _worker_config
-    _worker_df     = df_shared
-    _worker_config = config_shared
+    global _worker_df, _worker_config, _worker_lcdb_records
+    _worker_df           = df_shared
+    _worker_config       = config_shared
+    _worker_lcdb_records = lcdb_records_shared
 
 def _worker_call(provid):
     """Process one asteroid — called in worker process."""
     try:
-        df_obj = load_single_object(provid, _worker_df)
-        row    = run_single_asteroid(df_obj, _worker_config)
+        df_obj      = load_single_object(provid, _worker_df)
+        lcdb_record = (_worker_lcdb_records or {}).get(provid)
+        row         = run_single_asteroid(df_obj, _worker_config,
+                                          lcdb_record=lcdb_record)
         return provid, row, None
     except Exception as e:
         return provid, None, str(e)
+
+
+# ── LCDB helper ───────────────────────────────────────────────────────────────
+
+def _load_lcdb_records(provids: list) -> dict:
+    """
+    Load LCDB once and return a {provid: LCDBRecord} dict for all provids.
+
+    Falls back gracefully to an empty dict on any load error so that a
+    missing or corrupt LCDB cache never aborts a pipeline run — each
+    asteroid will simply get lcdb_record=None (all LCDB fields → NaN).
+
+    The cache is downloaded on first use to LCDB_CACHE (see sources/lcdb.py).
+    Subsequent runs use the cached file (~5 MB, updates annually).
+    """
+    try:
+        df_lcdb = load_lcdb()
+        records = lookup_batch(provids, df_lcdb)
+        n_found = sum(1 for r in records.values() if r.found)
+        logger.info(
+            f"LCDB: {n_found}/{len(provids)} objects found "
+            f"(u≥2: {sum(1 for r in records.values() if r.found and r.u_code >= 2)})"
+        )
+        return records
+    except Exception as e:
+        logger.warning(
+            f"LCDB load failed ({type(e).__name__}: {e}) — "
+            f"continuing without LCDB cross-validation"
+        )
+        return {}
 
 
 def run_pipeline_parallel(
@@ -129,6 +164,9 @@ def run_pipeline_parallel(
         logger.info(f"Resuming: skipping {n_before - len(provids)} "
                     f"already-processed objects")
 
+    # ── LCDB: pre-load once, batch-lookup all provids ─────────────────────────
+    lcdb_records = _load_lcdb_records(provids)
+
     logger.info(f"Starting parallel pipeline: {len(provids)} asteroids, "
                 f"{n_workers} workers")
 
@@ -138,7 +176,7 @@ def run_pipeline_parallel(
     with Pool(
         processes   = n_workers,
         initializer = _worker_init,
-        initargs    = (df, config),
+        initargs    = (df, config, lcdb_records),
     ) as pool:
         for provid, row, err in tqdm(
             pool.imap_unordered(_worker_call, provids, chunksize=4),
@@ -210,13 +248,18 @@ def run_pipeline(
                 f"P=[{config.period.period_min_hr},{config.period.period_max_hr}]hr, "
                 f"ZTF={'on' if config.data.use_ztf else 'off'}")
 
+    # ── LCDB: pre-load once, batch-lookup all provids ─────────────────────────
+    lcdb_records = _load_lcdb_records(provids)
+
     n_t1_pass = n_t2_pass = n_t3_tentative = n_followup = n_error = 0
     n_ztf_augmented = 0
 
     for i, provid in enumerate(tqdm(provids, desc="Processing asteroids")):
         try:
-            df_obj = load_single_object(provid, df)
-            row    = run_single_asteroid(df_obj, config)
+            df_obj      = load_single_object(provid, df)
+            lcdb_record = lcdb_records.get(provid)
+            row         = run_single_asteroid(df_obj, config,
+                                              lcdb_record=lcdb_record)
             catalog = append_result(catalog, row)
 
             # Tally outcomes
@@ -277,6 +320,7 @@ def run_pipeline(
 def run_single_asteroid(
     df_obj: pd.DataFrame,
     config: PipelineConfig = DEFAULT_CONFIG,
+    lcdb_record = None,     # LCDBRecord | None  (from sources.lcdb)
 ) -> dict:
     """
     Run all tiers for a single asteroid and return a catalog row dict.
@@ -297,6 +341,15 @@ def run_single_asteroid(
          OR n_obs < config.data.ztf_trigger_n_obs
       3. Preliminary characterisation does NOT show regime=="combined"
          (avoid double-fetching for objects already augmented externally)
+
+    lcdb_record — Change 11
+    -----------------------
+    Optional LCDBRecord from sources.lcdb.  When provided:
+      - Passed to characterise() so lcdb_period / lcdb_u_code populate char.
+      - Passed to every compute_reliability() call so lcdb_agreement and
+        lcdb_delta_pct populate the catalog row.
+    If None (default, or object not in LCDB) all LCDB fields remain NaN /
+    "no_prior" — identical behaviour to before this change.
     """
     provid = df_obj["provid"].iloc[0] if "provid" in df_obj.columns else "unknown"
     logger.debug(f"Processing: {provid}")
@@ -304,7 +357,7 @@ def run_single_asteroid(
     pdir = config.output.precompute_dir  # empty string = disabled
 
     # ── Data characterisation (preliminary) ───────────────────────────────────
-    char = characterise(df_obj)
+    char = characterise(df_obj, lcdb_record=lcdb_record)
     logger.debug(
         f"{provid}: regime={char.regime} ceiling={char.reliability_ceiling} "
         f"nights={char.n_nights} baseline={char.baseline_days:.1f}d "
@@ -326,7 +379,7 @@ def run_single_asteroid(
 
     # Re-characterise if augmented (source count may have changed)
     if "source" in df_obj.columns and df_obj["source"].nunique() > char.n_sources:
-        char = characterise(df_obj)
+        char = characterise(df_obj, lcdb_record=lcdb_record)
         logger.debug(
             f"{provid}: post-ZTF regime={char.regime} "
             f"N={char.n_obs} sources={char.n_sources}"
@@ -339,7 +392,7 @@ def run_single_asteroid(
     t1 = run_tier1(data, config)
 
     if not t1.passes:
-        rel = compute_reliability(char, t1)
+        rel = compute_reliability(char, t1, lcdb_record=lcdb_record)
         if pdir:
             _precompute_save_all(provid, data, t1, None, None, rel, pdir)
         return result_to_row(data, t1, char=char, rel=rel)
@@ -348,14 +401,14 @@ def run_single_asteroid(
     t2 = run_tier2(data, t1, config)
 
     if not t2.to_tier3:
-        rel = compute_reliability(char, t1, t2)
+        rel = compute_reliability(char, t1, t2, lcdb_record=lcdb_record)
         if pdir:
             _precompute_save_all(provid, data, t1, t2, None, rel, pdir)
         return result_to_row(data, t1, t2, char=char, rel=rel)
 
     # ── Tier 3 ────────────────────────────────────────────────────────────────
     t3  = run_tier3(data, t2, config)
-    rel = compute_reliability(char, t1, t2, t3)
+    rel = compute_reliability(char, t1, t2, t3, lcdb_record=lcdb_record)
     if pdir:
         _precompute_save_all(provid, data, t1, t2, t3, rel, pdir)
     return result_to_row(data, t1, t2, t3, char=char, rel=rel)
