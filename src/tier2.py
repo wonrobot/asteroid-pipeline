@@ -523,10 +523,37 @@ def compute_mbls_fap(
     Why a coarse grid for permutations?
     ------------------------------------
     The null distribution only needs the max-power statistic — we don't
-    need to resolve individual peaks. A 500-point grid gives the same
-    max-power distribution as an 8000-point grid but runs 16× faster.
-    The fine-grid observed power is still used as the comparison value,
-    so we're not losing precision on the detection side.
+    need to resolve individual peaks. A 500-point grid runs ~16× faster
+    than the full fine grid.
+
+    KNOWN LIMITATION — coarse/fine grid asymmetry
+    ----------------------------------------------
+    The observed max power is taken from the fine grid (up to 50,000 pts).
+    The null distribution is built from permutations on the coarse grid
+    (500 pts). This creates an asymmetry: a fine grid has more trial
+    frequencies and therefore more chances for a noise peak to reach a
+    given threshold, even under the null. Comparing fine-grid observed
+    power against coarse-grid null power causes the FAP to be
+    systematically underestimated — the test is anti-conservative
+    (over-publishes in marginal cases).
+
+    The correct fix (not yet implemented, see roadmap below) is either:
+      (a) Run all permutations on the full fine grid — exact but slow.
+      (b) Horne & Baliunas (1986) correction: scale observed fine-grid
+          power to its coarse-grid equivalent before comparing, using the
+          ratio of independent frequencies M_fine / M_coarse. The same
+          correction is already applied in gls_fap() for MHAOV.
+
+    In practice for Rubin commissioning data the vast majority of FAP
+    values are 0.0000 (0/200 permutations exceed observed power). The
+    signals are clear enough that the asymmetry is not causing false
+    positives. The concern would matter most for marginal detections near
+    the FAP threshold. This should be revisited in the Change 3 simulation
+    study when synthetic lightcurves at varying SNR are evaluated.
+
+    Roadmap: implement option (b) — compute observed power on coarse grid
+    at the already-identified best_mbls period (single evaluation, not a
+    full periodogram), then compare against the coarse-grid null.
 
     Typical cost: ~0.5–2s per asteroid (200 perms × coarse grid).
 

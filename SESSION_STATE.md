@@ -27,7 +27,7 @@
 | Notebook fix | Both notebooks save to Drive (survive Colab disconnects) | `4910e25` + `5ea0980` |
 | Bug fix | KeyError: source column in run_single_asteroid | `1eda6df` |
 | Bug fix | OSError 107: Drive disconnect kills logging/catalog saves | `52d72af` |
-| Bug fix | Stale module cache after git pull; KeyError now logs full traceback | `91c3a93` |
+| Change 8 | MBLS-primary: remove CE voting, fix 2-minima gate, MHAOV=validator | `a9cfa68` |
 
 ---
 
@@ -92,31 +92,40 @@ floor fix confirmed working.
 
 ## What to do next (in priority order)
 
-### 1. Change 7 Phase 3 — Combined window function
-When Rubin + ZTF data are merged, Tier 2 should compute separate window functions
-per survey and combine them (product). This dramatically reduces alias power and
-is the most direct fix for the superfast misses and wrong R=3 answers.
+### 0. Re-run validation after Change 8  ← DO THIS FIRST
+Change 8 redesigns core Tier 2 decision logic (MBLS-primary, CE removed from
+voting, 2-minima rule unconditional). Previous validation results (97%/97%
+published, 53%/51% exact) predate this change.
+Expected improvements: 13 objects where MBLS was correct but MHAOV+CE voted
+it down should now resolve correctly.
 
-**Files to change:**
-- `src/window.py` — add `compute_combined_window(t_hrs_by_source, periods)`
-- `src/tier2.py` — when `char.regime == "combined"`, call combined window
-- `src/tier1.py` — same
+### 1. MBLS FAP coarse/fine grid fix (documented, not yet implemented)
+The permutation test compares fine-grid observed power against coarse-grid
+null power — systematic FAP underestimate (anti-conservative). Not causing
+false positives in current data (signals are unambiguous, FAP=0.000/200).
+Fix when needed:
+- Option A: run permutations on full fine grid (exact, slow)
+- Option B: Horne & Baliunas (1986) correction — compute observed power at
+  best_mbls on coarse grid (single eval), compare against coarse null.
+  Same correction already implemented in gls_fap() for MHAOV.
+Revisit in Change 3 simulation study at varying SNR.
 
-**Scientific basis:** VanderPlas (2018) §4
+### 2. Change 7 Phase 3 — Combined window function
+When Rubin + ZTF data are merged, compute separate window functions per
+survey and combine (product). Directly addresses alias-harmonic failures.
+Files: `src/window.py`, `src/tier1.py`, `src/tier2.py`
+Scientific basis: VanderPlas (2018) §4
 
-### 2. LCDB/DAMIT cross-check for R=3 results
-Wire `lcdb_record` into `run_single_asteroid()` — already scaffolded in
-`src/sources/lcdb.py` (fully implemented) and `src/sources/validation_sources.py`
-(stubs). This is the only way to catch MD38/MH40-style wrong R=3 answers.
-`compute_reliability()` already accepts an optional `lcdb_record` parameter.
+### 3. LCDB/DAMIT cross-check for R=3 results
+Wire `lcdb_record` into `run_single_asteroid()` to catch MD38/MH40-style
+wrong R=3 answers. `src/sources/lcdb.py` fully implemented. Just needs wiring.
 
-### 3. Change 3 continuation — simulation study for remaining provisional values
-`CONTAMINATION_THRESHOLD = 0.2` and `WINDOW_PENALTY_ALPHA = 0.7` are still
-undocumented. Inject synthetic lightcurves into real Rubin timestamps, measure
-recovery vs. contamination score, set thresholds at 5% FPR.
+### 4. Change 3 simulation study
+`CONTAMINATION_THRESHOLD = 0.2` and `WINDOW_PENALTY_ALPHA = 0.7` still
+provisional. Also the correct place to validate the MBLS FAP fix above.
 
-### 4. Change 7 Phase 4 — ATLAS stub implementation
-Requires free registration at https://fallingstar-data.com/forcedphot/
+### 5. Change 7 Phase 4 — ATLAS stub
+Requires registration at https://fallingstar-data.com/forcedphot/
 
 ---
 

@@ -231,7 +231,51 @@ ME68, MG56, MN45 (blind) — alias harmonics or insufficient phase coverage at
 
 ## Changelog
 
-### Change 3 — Heuristic thresholds replaced with peer-reviewable derivations
+### Change 8 — MBLS-primary architecture (current)
+*Commit: `a9cfa68`*
+
+Three bugs removed from the Tier 2 decision logic, all with empirical
+justification from Greenstreet et al. (2026) validation (76 objects):
+
+**Empirical basis:**
+- MBLS correct (alone or with MHAOV): 83% of objects
+- MHAOV correct (alone or with MBLS): 71% of objects
+- MBLS only correct: 13 objects. MHAOV only correct: ≤3 objects.
+
+**Bug 1 — CE defaulted to MHAOV period when skipped:**
+All Rubin data has Eyer & Bartholdi floor ~1.4min < CE minimum 60min,
+so CE is skipped for every object. The old code set `best_ce = best_mhaov`
+when skipped, giving MHAOV two votes disguised as a three-method consensus.
+Fix: `best_ce = NaN` when skipped. CE is annotation-only and never
+participates in the period decision.
+
+**Bug 2 — 2-minima rule gated on MHAOV agreement:**
+The 2-minima rule (doubling the MBLS period when the fitted lightcurve
+has only one minimum) is a physical test on the MBLS model. It should not
+require MHAOV to agree first — that is a circular dependency that prevented
+MBLS from correcting itself when MHAOV was wrong.
+Fix: 2-minima rule applied unconditionally.
+
+**Bug 3 — Consensus = contamination-weighted median of MHAOV+MBLS+CE:**
+With CE copying MHAOV, the "median" pulled toward MHAOV. Now:
+consensus = best_mbls always. MHAOV confirms or disagrees; it does not
+compete for the period value.
+
+**New decision paths:**
+- `mbls_confirmed`: MHAOV confirms MBLS (within tol or harmonic) + either sig → publish
+- `mbls_sig_only`:  MBLS FAP < 0.001, MHAOV not significant → publish R≤2
+- `to_tier3`:       Both significant, genuinely different periods → CLEAN
+- `reject`:         Neither gate significant
+
+**Known limitation documented (not yet fixed):**
+MBLS FAP uses fine-grid observed power vs coarse-grid null — systematic
+underestimate. Signals are clear enough in commissioning data that this
+does not cause false positives in practice. Fix planned in Change 3
+simulation study (Horne & Baliunas correction or same-grid permutations).
+
+---
+
+
 *Commit: `d27177a`*
 
 Three previously-arbitrary thresholds replaced:
