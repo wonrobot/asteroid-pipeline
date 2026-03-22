@@ -33,60 +33,51 @@
 
 ## Validation results (Greenstreet et al. 2026, 76 objects)
 
-Run date: 2026-03-22. Pipeline state: post-Change-3 + alias logic fix.  
+Run date: 2026-03-22. Pipeline state: post-Change-8 (MBLS-primary architecture).  
 BigQuery date range: `obstime 2025-04-21 to 2025-05-06`  
 BQ export folder: `bq-results-20260321-232234-1774135371078`
 
-| Set | Objects | Published (R≥1) | Exact (<10%) | Superfast |
-|-----|---------|-----------------|--------------|-----------|
-| Validation (37) | 37 | 36 (97%) | 20/37 (54%) | 6/9 |
-| Blind (39) | 39 | 38 (97%) | 20/39 (51%) | 7/10 |
+| Set | Objects | Published (R≥1) | Exact (<10%) | Exact+Harmonic | Superfast |
+|-----|---------|-----------------|--------------|----------------|-----------|
+| Validation (37) | 37 | 36 (97%) | 27/37 (73%) | 28/37 (76%) | 6/9 |
+| Blind (39) | 39 | 38 (97%) | 26/39 (67%) | 28/39 (72%) | 6/8 |
 
 **R-code breakdown:**
 
 | | R=3 | R=2 | R=1 | R=0 | R=-1 |
 |-|-----|-----|-----|-----|------|
-| Validation | 10 | 25 | 1 | 1 | 0 |
-| Blind | 9 | 26 | 3 | 0 | 1 |
+| Validation | 9 | 27 | 0 | 1 | 0 |
+| Blind | 9 | 29 | 0 | 0 | 1 |
 
-### Change vs previous run (pre-Change-3, pre-alias-fix)
+### Change vs pre-Change-8
 
-| Metric | Old | New | Change |
-|--------|-----|-----|--------|
-| Validation published | 34/37 (92%) | 36/37 (97%) | +2 ↑ |
-| Blind published | 30/39 (77%) | 38/39 (97%) | +8 ↑↑ |
-| Validation exact | 21/37 (57%) | 20/37 (54%) | -1 (noise) |
-| Blind exact | 20/39 (51%) | 20/39 (51%) | = |
-| Superfast (val) | 7/9 | 6/9 | -1 (MN25 now R=0) |
-| Superfast (blind) | 7/10 | 7/10 | = |
-| Total R=-1 | many | 1 | ↓↓ alias fix worked |
+| Metric | Pre-C8 | Post-C8 | Δ |
+|--------|--------|---------|---|
+| Validation exact | 20/37 (54%) | 27/37 (73%) | +7 ↑↑ |
+| Blind exact | 20/39 (51%) | 26/39 (67%) | +6 ↑↑ |
+| Published (both) | 97% | 97% | = |
 
-The large blind-set publication improvement (77%→97%) is the alias logic fix
-eliminating false R=-1 vetoes. The one remaining R=-1 is MD67 (near 12hr alias,
-correct veto). MK41 (P=0.063hr) is now correctly recovered — Eyer & Bartholdi
-floor fix confirmed working.
+Change 8 fixed 13 objects previously wrong due to CE phantom-voting MHAOV.
+Key recoveries: MD76, MJ30, ML53, MO79, MV19, MN45, MK83, MV38, MV4, MC34.
+
+Match against Greenstreet primary + additional periods (Table 3):
+Validation 31/37 (84%), Blind 32/39 (82%).
 
 ### Known issues in the results
 
-1. **R=3 wrong answers persist** — MD38 (9.49hr, truth 15.8hr, Δ=40%) and
-   MH40 (4.84hr, truth 8.0hr, Δ=40%). Both are alias harmonics where all three
-   methods agreed on the wrong period. Unfixable without external ground truth.
-   Fix: wire LCDB/DAMIT cross-check into `run_single_asteroid`.
+1. **R=3 wrong answers** — MD38 (9.49hr, truth 15.8hr) and MH40 (4.84hr,
+   truth 8.0hr). Both are alias harmonics. Unfixable without LCDB wiring.
 
-2. **Superfast misses (6 objects):**
-   - MJ71 (truth 0.031hr → pipe 7.1hr): alias harmonic dominated, R=1
-   - MN25 (truth 0.40hr → no period found): R=0, insufficient phase coverage
-   - MU15 (truth 0.40hr → pipe 9.7hr): alias harmonic, R=2 wrong answer
-   - ME68 blind (truth 0.9hr → pipe 15.6hr): alias harmonic, R=2 wrong answer
-   - MG56 blind (truth 0.30hr → pipe 0.263hr): Δ=12.3%, just outside 10% tol
-   - MN45 blind (truth 0.031hr → pipe 0.094hr): 3× harmonic, Δ=203%
-   All require longer baseline or ZTF augmentation.
+2. **True failures (12):**
+   - Superfast alias harmonics (MJ71, MU15, ME68, MG56) — need ZTF/longer baseline
+   - Long-period aliases (ME15, MN7, MJ23, MN37, MP21, MT24) — alias ambiguity
+   - MN25: R=0, insufficient phase coverage
 
-3. **cadence_alias_soft on correct periods** — 12 objects have `cadence_alias_soft`
-   flag; 7 of these have exact period recovery. The flag is conservative and
-   correct behaviour (publish with caveat rather than veto), but the contamination
-   threshold (0.2) and penalty alpha (0.7) are still provisional pending Change 3
-   simulation study.
+3. **MN45 now correctly recovered** (truth 0.031hr, pipe 0.031hr, exact) — was
+   previously a miss. MN45 is the most extreme superfast in the dataset.
+
+4. **cadence_alias_soft flags** — provisional thresholds (0.2/0.7) pending
+   Change 3 simulation study.
 
 ---
 
