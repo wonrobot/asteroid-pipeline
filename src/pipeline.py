@@ -442,15 +442,46 @@ def _maybe_augment_ztf(
         return df_obj
 
 
+class _ResilientFileHandler(logging.FileHandler):
+    """
+    FileHandler that silently swallows OSErrors on emit and close.
+
+    Google Drive FUSE mounts can become unavailable mid-run
+    (errno 107 = transport endpoint not connected; errno 5 = I/O error).
+    The standard FileHandler propagates these as unhandled exceptions that
+    crash the pipeline. This subclass catches them so the pipeline keeps
+    running and results are not lost.
+
+    On emit failure it falls back to stderr so the message is not silently
+    dropped. On close failure it suppresses the error entirely.
+    """
+    def emit(self, record):
+        try:
+            super().emit(record)
+        except OSError:
+            # Fallback: write to stderr so the message is not lost
+            try:
+                import sys
+                print(self.format(record), file=sys.stderr)
+            except Exception:
+                pass
+
+    def close(self):
+        try:
+            super().close()
+        except OSError:
+            pass
+
+
 def setup_logging(config: PipelineConfig = DEFAULT_CONFIG) -> None:
     """
     Configure logging to both console and log file.
     Call once at the start of a run.
 
-    If the configured log file path is on a remote mount (e.g. Google Drive)
-    that is unavailable, falls back to a local log file at
-    /content/pipeline_fallback.log so the run is never blocked by a
-    Drive connectivity issue.
+    Uses _ResilientFileHandler so that Google Drive FUSE disconnects
+    (errno 107 / errno 5) during a long run do not crash the pipeline.
+    Falls back to /content/pipeline_fallback.log if the configured path
+    is unreachable.
     """
     os.makedirs(config.output.results_dir, exist_ok=True)
 
@@ -459,17 +490,14 @@ def setup_logging(config: PipelineConfig = DEFAULT_CONFIG) -> None:
 
     handlers = [logging.StreamHandler()]
 
-    # Try to open the configured log file; fall back to a local path if the
-    # Drive mount is unavailable (OSError errno 107 = transport endpoint not
-    # connected; errno 5 = I/O error on FUSE).
     log_path = config.output.log_file
     try:
-        fh = logging.FileHandler(log_path, mode="a")
+        fh = _ResilientFileHandler(log_path, mode="a")
         handlers.append(fh)
     except OSError as e:
         fallback = "/content/pipeline_fallback.log"
         try:
-            fh = logging.FileHandler(fallback, mode="a")
+            fh = _ResilientFileHandler(fallback, mode="a")
             handlers.append(fh)
             print(f"[setup_logging] Drive log unavailable ({e}); "
                   f"falling back to {fallback}")
