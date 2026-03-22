@@ -187,16 +187,21 @@ def run_tier2(
     #   n = 100 × T_days × (f_max − f_min)
     #   = 100 × T_hrs × (1/P_min_hrs − 1/P_max_hrs)
     #
-    # The 100× oversampling ensures a smoothly resolved periodogram even
-    # for fast rotators. T1 best period focuses the search: below 0.5hr
-    # we keep the full range down to the Eyer & Bartholdi floor; above
-    # 0.5hr we start from T1/4 to capture P/2 and P/3 harmonics.
-    t1_best = t1result.best_period_mbls
+    # Grid lower bound is derived from the LOWEST of all significant T1 MBLS
+    # peaks rather than the single argmax.  Previously the grid was anchored at
+    # t1_best/4, which committed Tier 2 to the same alias that Tier 1 found.
+    # Using min(t1result.mbls_peaks)/4 means that if T1 found peaks at e.g.
+    # [3.0hr, 6.5hr, 12.1hr], the grid starts at 0.75hr and covers all three
+    # peaks and their full periods — no single-peak commitment.
+    t1_best  = t1result.best_period_mbls
+    t1_peaks = t1result.mbls_peaks  # top-N window-penalised, length >= 1
+    t1_lowest_peak = float(np.min(t1_peaks)) if len(t1_peaks) > 0 else t1_best
+
     if t1_best < 0.5:
         p_min = data.period_min_hr   # full range — genuine fast rotator
         n_cap = 100_000              # allow dense grid for sub-hour periods
     else:
-        p_min = max(data.period_min_hr, t1_best / 4.0)
+        p_min = max(data.period_min_hr, t1_lowest_peak / 4.0)
         n_cap = 50_000
     p_max = min(cfg_p.period_max_hr, data.baseline_hr)
     # Greenstreet Eq. 4: n = 100 × T × (f_max − f_min)
@@ -255,20 +260,24 @@ def run_tier2(
         )
         best_mbls_raw = test_periods[np.argmax(mbls_pow)]
 
-        # Always apply 2-minima rule — no MHAOV gate
-        best_mbls, was_doubled, n_minima = apply_two_minima_rule(
+        # 2-minima likelihood ratio test (Change 9).
+        # Replaces the prominence-threshold rule (prominence=0.01 was an
+        # arbitrary tuning parameter).  The LRT fits MBLS at P and at 2P and
+        # applies an F-test on the residual improvement: double only when 2P
+        # explains significantly more variance (p < LRT_ALPHA).
+        best_mbls, was_doubled, n_minima = apply_two_minima_lrt(
             data.t_hrs, data.y_multiband, data.dy, data.bands,
             period=best_mbls_raw, nterms=cfg_p.mbls_nterms_t2,
         )
         if was_doubled:
             logger.debug(
-                f"{data.provid}: 2-minima rule: {best_mbls_raw:.3f}hr "
-                f"({n_minima} minima) → doubled to {best_mbls:.3f}hr"
+                f"{data.provid}: LRT 2-minima: {best_mbls_raw:.3f}hr "
+                f"→ doubled to {best_mbls:.3f}hr (F={n_minima:.2f})"
             )
         else:
             logger.debug(
-                f"{data.provid}: 2-minima rule: kept at {best_mbls_raw:.3f}hr "
-                f"({n_minima} minima, no doubling needed)"
+                f"{data.provid}: LRT 2-minima: kept at {best_mbls_raw:.3f}hr "
+                f"(F={n_minima:.2f}, no doubling)"
             )
     except Exception as e:
         logger.warning(f"{data.provid}: MBLS Tier2 failed ({e}) — falling back to MHAOV period")
@@ -955,6 +964,101 @@ def check_agreement(
     return False, spread_pct
 
 
+def apply_two_minima_lrt(
+    t:             np.ndarray,
+    y_multiband:   np.ndarray,
+    dy:            np.ndarray,
+    bands:         np.ndarray,
+    period:        float,
+    nterms:        int   = 2,
+    alpha:         float = 0.05,
+    dominant_band: str   = None,
+) -> tuple:
+    """
+    Likelihood ratio test for period doubling (Change 9).
+
+    Replaces the prominence-threshold 2-minima rule.  The old rule
+    (find_peaks with prominence=0.01 on a fitted curve) had an arbitrary
+    tuning parameter with no statistical basis.  This function uses an
+    F-test on the weighted residuals.
+
+    Procedure (Wilks 1938 / standard regression F-test):
+      1. Fit MBLS at candidate period P  → weighted residual chi2_P
+      2. Fit MBLS at candidate period 2P → weighted residual chi2_2P
+      3. The 2P model has 2 extra free parameters (cos + sin at freq 1/(2P))
+         not present in the P model.  Under H0 (true period is P):
+             F = ((chi2_P − chi2_2P) / 2) / (chi2_2P / (N − k_2P))
+         follows an F(2, N−k_2P) distribution asymptotically.
+      4. Double if p_value < alpha (default 0.05).
+         Otherwise keep P — the improvement is not significant.
+
+    Physical meaning: double only when the data contain a statistically
+    significant brightness feature at the half-frequency (i.e., the
+    lightcurve genuinely has unequal-depth minima at period 2P).
+
+    Parameters
+    ----------
+    period : candidate MBLS period in hours
+    nterms : Fourier terms used in the MBLS fit (must match T2 fit)
+    alpha  : F-test significance level for doubling (default 0.05)
+
+    Returns
+    -------
+    (corrected_period, was_doubled, f_stat)
+      corrected_period : period after LRT decision (P or 2P)
+      was_doubled      : True if LRT chose 2P
+      f_stat           : F-statistic (for logging / catalog annotation)
+    """
+    from scipy.stats import f as f_dist
+
+    N = len(t)
+    w = 1.0 / dy**2
+
+    def _chi2(p: float) -> float:
+        """Weighted residual chi-sq for MBLS fit at period p."""
+        model = LombScargleMultiband(Nterms_base=nterms, Nterms_band=0)
+        model.fit(t, y_multiband, dy, bands)
+        y_pred = model.predict(t, filts=bands, period=p)
+        return float(np.sum(w * (y_multiband - y_pred) ** 2))
+
+    chi2_P  = _chi2(period)
+    chi2_2P = _chi2(period * 2.0)
+
+    # Number of parameters: intercept + nterms cos + nterms sin = 1 + 2*nterms
+    # 2P model adds 2 terms (cos + sin at the new fundamental 1/(2P))
+    k_P      = 1 + 2 * nterms
+    k_2P     = k_P + 2
+    df_extra = 2
+    df_resid = max(N - k_2P, 1)
+
+    # Improvement — clamp to zero to guard against numerical noise where
+    # chi2_2P is marginally larger than chi2_P due to fitting instability
+    improvement = max(chi2_P - chi2_2P, 0.0)
+
+    if chi2_2P <= 0:
+        # Degenerate fit (perfect residuals at 2P) — trust the 2P fit
+        logger.debug(
+            f"LRT 2-minima: chi2_2P=0 at {period*2:.3f}hr — degenerate, doubling"
+        )
+        return period * 2.0, True, np.inf
+
+    f_stat  = (improvement / df_extra) / (chi2_2P / df_resid)
+    p_value = float(1.0 - f_dist.cdf(f_stat, df_extra, df_resid))
+
+    if p_value < alpha:
+        logger.debug(
+            f"LRT 2-minima: F={f_stat:.2f} p={p_value:.4f} < {alpha} "
+            f"→ doubling {period:.3f}hr → {period*2:.3f}hr"
+        )
+        return period * 2.0, True, f_stat
+    else:
+        logger.debug(
+            f"LRT 2-minima: F={f_stat:.2f} p={p_value:.4f} ≥ {alpha} "
+            f"→ keeping {period:.3f}hr (no significant improvement at 2P)"
+        )
+        return period, False, f_stat
+
+
 def apply_two_minima_rule(
     t:             np.ndarray,
     y_multiband:   np.ndarray,
@@ -967,8 +1071,13 @@ def apply_two_minima_rule(
     dominant_band: str   = None,
 ) -> tuple:
     """
-    Apply the 2-minima rule to an MBLS period candidate.
-    Returns (corrected_period, was_doubled, n_minima).
+    DEPRECATED — retained for reference only.  Use apply_two_minima_lrt().
+
+    Original prominence-threshold rule: fit MBLS at P, count minima in the
+    fitted curve using scipy find_peaks with prominence=0.01.  If fewer than
+    2 minima, double.  The prominence threshold was arbitrary and caused
+    over-doubling (MF76, MJ13, MP67).  Replaced by apply_two_minima_lrt()
+    in Change 9.
     """
     from scipy.signal import find_peaks
 

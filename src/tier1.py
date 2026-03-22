@@ -117,6 +117,11 @@ class Tier1Result:
     gls_contamination   : alias contamination score for best GLS period [0–1].
                           0 = clean, 1 = sits exactly on a window peak.
     mbls_contamination  : alias contamination score for best MBLS period [0–1].
+    mbls_peaks          : top-N window-penalised MBLS peak periods (hours),
+                          sorted by adjusted power descending.  Tier 2 uses
+                          min(mbls_peaks) to set its grid lower bound so that
+                          all significant T1 peaks — not just the argmax — are
+                          covered at fine resolution.  Always length ≥ 1.
     """
     provid:              str
     passes:              bool
@@ -133,6 +138,7 @@ class Tier1Result:
     window_power:        np.ndarray   # window function on same grid as test_periods
     gls_contamination:   float        # cadence-alias score for best GLS period
     mbls_contamination:  float        # cadence-alias score for best MBLS period
+    mbls_peaks:          np.ndarray   # top-N window-penalised MBLS peaks (hrs)
 
 
 # ── Main Tier 1 entry point ───────────────────────────────────────────────────
@@ -306,6 +312,25 @@ def run_tier1(
         mbls_pow  = gls_pow.copy()
         best_mbls = best_gls
 
+    # ── Window-penalised MBLS peaks ───────────────────────────────────────────
+    # Same treatment as GLS: find the top N peaks in the window-adjusted MBLS
+    # power. This gives Tier 2 a ranked list of candidate periods rather than
+    # a single argmax, so its search grid covers all significant peaks and their
+    # harmonics — preventing T1 alias-lock from misplacing the T2 grid.
+    #
+    # N_MBLS_PEAKS=5: captures fundamental + up to 4 alias/harmonic peaks.
+    # Tier 2 uses min(mbls_peaks)/4 as its grid lower bound.
+    N_MBLS_PEAKS = 5
+    mbls_peak_periods, _, _ = window_informed_peaks(
+        test_periods, mbls_pow, window_pow,
+        n_peaks=N_MBLS_PEAKS,
+        min_period_hr=float(test_periods[0]),
+        max_period_hr=float(test_periods[-1]),
+    )
+    # Guarantee at least the argmax is present (defensive fallback)
+    if len(mbls_peak_periods) == 0:
+        mbls_peak_periods = np.array([best_mbls])
+
     # Score MBLS best period for window contamination
     mbls_cont = contamination_score(float(best_mbls), test_periods, window_pow,
                                 baseline_hr=data.baseline_hr)
@@ -320,7 +345,8 @@ def run_tier1(
     logger.debug(
         f"{data.provid} Tier1: GLS best={best_gls:.3f}hr "
         f"(cont={gls_cont:.2f}) power={gls_max:.3f}, "
-        f"MBLS best={best_mbls:.3f}hr (cont={mbls_cont:.2f}) → PASS"
+        f"MBLS best={best_mbls:.3f}hr (cont={mbls_cont:.2f}) "
+        f"peaks={[f'{p:.3f}' for p in mbls_peak_periods]} → PASS"
     )
 
     return Tier1Result(
@@ -332,6 +358,7 @@ def run_tier1(
         window_power=window_pow,
         gls_contamination=gls_cont,
         mbls_contamination=mbls_cont,
+        mbls_peaks=mbls_peak_periods,
     )
 
 
@@ -425,4 +452,5 @@ def _reject(
         window_power=empty,
         gls_contamination=np.nan,
         mbls_contamination=np.nan,
+        mbls_peaks=empty,
     )
