@@ -27,6 +27,7 @@ combined
     Data from multiple survey sources (LSST + ZTF etc).
     Different window functions suppress cross-survey aliases.
     CLEAN most powerful. All methods applicable.
+    Unlocked when df["source"].nunique() > 1 (Change 7).
 
 unknown
     Insufficient data to classify. Flag for manual review.
@@ -87,6 +88,8 @@ class DataCharacterisation:
     night_duration_hr   : median duration of each observing night in hours
     snr_proxy           : amplitude / median(rmsmag) proxy
     mag_range           : peak-to-peak raw magnitude range
+    n_sources           : number of distinct survey sources (1=Rubin only, 2+=combined)
+    sources             : list of survey source names e.g. ["Rubin", "ZTF"]
     dominant_aliases_hr : list of alias periods (hours) to watch for
     alias_risk          : dict of {period_hr: risk_label} for known aliases
     lcdb_period         : known period from LCDB (NaN if not found)
@@ -108,6 +111,8 @@ class DataCharacterisation:
     night_duration_hr:    float
     snr_proxy:            float
     mag_range:            float
+    n_sources:            int          # Change 7: number of distinct survey sources
+    sources:              List[str]    # Change 7: e.g. ["Rubin", "ZTF"]
     dominant_aliases_hr:  List[float]
     alias_risk:           dict
     lcdb_period:          float
@@ -149,11 +154,20 @@ def characterise(
     ----------
     df_obj      : observations DataFrame (from ingestion)
                   Required columns: provid, mjd, band, mag, rmsmag
+                  Optional column:  source — used to count n_sources (Change 7).
+                  If "source" is absent, n_sources defaults to 1 ("Rubin").
     lcdb_record : LCDBRecord from sources.lcdb (optional)
 
     Returns
     -------
     DataCharacterisation
+
+    Change 7 note
+    -------------
+    When df_obj["source"].nunique() > 1 (e.g. "Rubin" + "ZTF"), the
+    _classify_regime() call will return "combined", unlocking all methods
+    with the highest reliability ceiling. This happens automatically once
+    merge_with_rubin() has tagged the rows — no other call-site changes needed.
     """
     provid = df_obj["provid"].iloc[0] if "provid" in df_obj.columns else "unknown"
 
@@ -172,6 +186,16 @@ def characterise(
     bands        = sorted(df["band"].unique().tolist())
     n_bands      = len(bands)
     baseline_days = float(mjds.max() - mjds.min()) if n_obs > 1 else 0.0
+
+    # ── Source count (Change 7) ───────────────────────────────────────────────
+    # Previously hardcoded to 1. Now read from the "source" column when present.
+    # _classify_regime() uses n_sources > 1 to unlock regime="combined".
+    if "source" in df.columns:
+        n_sources = int(df["source"].nunique())
+        sources   = sorted(df["source"].dropna().unique().tolist())
+    else:
+        n_sources = 1
+        sources   = ["Rubin"]
 
     # ── Night structure ───────────────────────────────────────────────────────
     night_ids = _assign_nights(mjds)
@@ -195,17 +219,9 @@ def characterise(
     snr_proxy   = mag_range / median_err if median_err > 0 else 0.0
 
     # ── Regime classification ─────────────────────────────────────────────────
-    # n_sources is hardcoded to 1 — "combined" regime is currently unreachable.
-    # Change 7 (see README roadmap) will wire this up:
-    #   1. Add source="Rubin"/"ZTF"/etc. column in ingestion._post_process
-    #   2. fetch_ztf() in sources/ztf.py fetches and tags ZTF observations
-    #   3. merge_with_rubin() combines and tags by source
-    #   4. Pass n_sources = df["source"].nunique() here
-    # When n_sources > 1, _classify_regime() returns "combined" which:
-    #   - enables all methods including CLEAN (most powerful for multi-survey)
-    #   - sets reliability_ceiling = "high"
-    #   - uses the joint window function (product of per-survey windows)
-    n_sources = 1   # CHANGE 7: replace with df_obj["source"].nunique()
+    # Change 7: n_sources now comes from df["source"].nunique() rather than
+    # the old hardcoded value of 1. When ZTF data is merged, n_sources=2
+    # and _classify_regime() returns "combined".
     regime = _classify_regime(
         n_obs=n_obs,
         baseline_days=baseline_days,
@@ -243,6 +259,8 @@ def characterise(
         n_obs=n_obs,
         n_nights=n_nights,
         n_seasons=n_seasons,
+        n_sources=n_sources,
+        sources=sources,
         baseline_days=baseline_days,
         obs_per_night_median=obs_per_night_median,
         night_duration_hr=night_duration_hr,
@@ -253,7 +271,8 @@ def characterise(
     )
 
     logger.debug(f"{provid}: regime={regime} ceiling={reliability_ceiling} "
-                 f"N={n_obs} nights={n_nights} seasons={n_seasons}")
+                 f"N={n_obs} nights={n_nights} seasons={n_seasons} "
+                 f"sources={n_sources}({','.join(sources)})")
 
     return DataCharacterisation(
         provid               = provid,
@@ -269,6 +288,8 @@ def characterise(
         night_duration_hr    = night_duration_hr,
         snr_proxy            = snr_proxy,
         mag_range            = mag_range,
+        n_sources            = n_sources,
+        sources              = sources,
         dominant_aliases_hr  = dominant_aliases_hr,
         alias_risk           = alias_risk,
         lcdb_period          = lcdb_period,
@@ -324,7 +345,7 @@ def _classify_regime(
     Classify data into a regime string.
 
     Decision tree:
-    1. Multiple sources → combined (best alias breaking)
+    1. Multiple sources → combined (best alias breaking, Change 7)
     2. Multiple seasons (>=3) and rich data → rich_multiyear
     3. Short baseline, dense nightly coverage → dense
     4. Otherwise → sparse
@@ -333,6 +354,9 @@ def _classify_regime(
     if n_obs < 20:
         return "unknown"
 
+    # Change 7: n_sources > 1 unlocks combined regime.
+    # This was previously unreachable (n_sources was hardcoded to 1).
+    # Now triggered automatically when merge_with_rubin() tags ZTF rows.
     if n_sources > 1:
         return "combined"
 
@@ -366,9 +390,9 @@ def _compute_alias_risk(alias_periods_hr: list) -> dict:
 
 
 def _build_notes(
-    regime, n_obs, n_nights, n_seasons, baseline_days,
-    obs_per_night_median, night_duration_hr, snr_proxy,
-    lcdb_period, lcdb_u_code, reliability_ceiling,
+    regime, n_obs, n_nights, n_seasons, n_sources, sources,
+    baseline_days, obs_per_night_median, night_duration_hr,
+    snr_proxy, lcdb_period, lcdb_u_code, reliability_ceiling,
 ) -> str:
     """Build a human-readable summary string."""
     parts = [
@@ -381,6 +405,8 @@ def _build_notes(
     ]
     if n_seasons > 1:
         parts.append(f"Seasons={n_seasons}")
+    if n_sources > 1:
+        parts.append(f"Sources={n_sources} ({'+'.join(sources)})")
     if not np.isnan(lcdb_period):
         parts.append(f"LCDB known P={lcdb_period:.3f}hr U={lcdb_u_code}")
     parts.append(f"Reliability ceiling: {reliability_ceiling}")

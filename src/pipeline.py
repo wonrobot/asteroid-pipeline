@@ -9,6 +9,7 @@ Handles
 - Per-asteroid try/except (one bad object shouldn't stop the run)
 - Progress reporting via tqdm
 - Catalog accumulation and periodic saves
+- Optional ZTF data augmentation (Change 7)
 
 Usage
 -----
@@ -19,6 +20,14 @@ Usage
     config = PipelineConfig()
     df     = load_from_csv("rubin_x05_20250226.csv", config)
     catalog = run_pipeline(df, config)
+
+ZTF augmentation (Change 7)
+---------------------------
+Enable by setting config.data.use_ztf=True. For each asteroid in the
+sparse regime (or below ztf_trigger_n_obs), the pipeline fetches ZTF
+photometry from IRSA and merges it before running the period search.
+Requires internet access and astroquery. Not recommended for bulk runs
+of millions of objects — use for targeted analyses of hundreds.
 
 Functions
 ---------
@@ -98,6 +107,10 @@ def run_pipeline_parallel(
     pickling it on every task call (~1.4GB would be prohibitive).
     Results are collected in the main process and checkpointed every
     save_every_n asteroids.
+
+    ZTF augmentation is NOT recommended with parallel workers — each
+    worker would make its own IRSA API calls, potentially hitting rate
+    limits. Fetch ZTF data first and merge before calling this function.
     """
     import multiprocessing as mp
     from multiprocessing import Pool
@@ -194,9 +207,11 @@ def run_pipeline(
     logger.info(f"Starting pipeline: {len(provids)} asteroids to process")
     logger.info(f"Config: SNR>{config.tier.snr_threshold}, "
                 f"Nobs>{config.tier.min_obs}, "
-                f"P=[{config.period.period_min_hr},{config.period.period_max_hr}]hr")
+                f"P=[{config.period.period_min_hr},{config.period.period_max_hr}]hr, "
+                f"ZTF={'on' if config.data.use_ztf else 'off'}")
 
     n_t1_pass = n_t2_pass = n_t3_tentative = n_followup = n_error = 0
+    n_ztf_augmented = 0
 
     for i, provid in enumerate(tqdm(provids, desc="Processing asteroids")):
         try:
@@ -209,6 +224,7 @@ def run_pipeline(
             if row.get("t2_passes"):     n_t2_pass += 1
             if row.get("reliability") == "tentative":    n_t3_tentative += 1
             if row.get("reliability") == "followup_needed": n_followup += 1
+            if row.get("n_sources", 1) > 1:              n_ztf_augmented += 1
 
         except KeyError:
             logger.warning(f"Asteroid '{provid}' not found in dataset — skipping")
@@ -224,7 +240,8 @@ def run_pipeline(
             logger.info(
                 f"Checkpoint [{i+1}/{len(provids)}]: "
                 f"T1={n_t1_pass} T2={n_t2_pass} "
-                f"tentative={n_t3_tentative} followup={n_followup} errors={n_error}"
+                f"tentative={n_t3_tentative} followup={n_followup} "
+                f"ZTF_aug={n_ztf_augmented} errors={n_error}"
             )
 
     # Final save
@@ -236,6 +253,7 @@ def run_pipeline(
     logger.info(f"  Tier2 passed: {n_t2_pass}  (confirmed periods)")
     logger.info(f"  Tentative:    {n_t3_tentative}")
     logger.info(f"  Follow-up:    {n_followup}")
+    logger.info(f"  ZTF augmented:{n_ztf_augmented}")
     logger.info(f"  Errors:       {n_error}")
 
     if config.output.verbose:
@@ -252,18 +270,49 @@ def run_single_asteroid(
 ) -> dict:
     """
     Run all tiers for a single asteroid and return a catalog row dict.
+
+    Change 7 — ZTF augmentation
+    ----------------------------
+    When config.data.use_ztf=True, this function fetches ZTF photometry
+    from IRSA for objects in the sparse regime (or below ztf_trigger_n_obs).
+    The decision is made on data-quality criteria BEFORE the period search,
+    not after seeing a failed result. If at least ztf_min_obs detections
+    are returned, they are merged via merge_with_rubin(), characterise()
+    is re-run on the combined dataset, and the period search proceeds on
+    the augmented lightcurve.
+
+    Trigger criteria (all must hold to attempt ZTF fetch):
+      1. config.data.use_ztf is True
+      2. Preliminary characterisation shows regime=="sparse"
+         OR n_obs < config.data.ztf_trigger_n_obs
+      3. Preliminary characterisation does NOT show regime=="combined"
+         (avoid double-fetching for objects already augmented externally)
     """
     provid = df_obj["provid"].iloc[0] if "provid" in df_obj.columns else "unknown"
     logger.debug(f"Processing: {provid}")
 
     pdir = config.output.precompute_dir  # empty string = disabled
 
-    # ── Data characterisation ─────────────────────────────────────────────────
+    # ── Data characterisation (preliminary) ───────────────────────────────────
     char = characterise(df_obj)
     logger.debug(
         f"{provid}: regime={char.regime} ceiling={char.reliability_ceiling} "
-        f"nights={char.n_nights} baseline={char.baseline_days:.1f}d"
+        f"nights={char.n_nights} baseline={char.baseline_days:.1f}d "
+        f"sources={char.n_sources}"
     )
+
+    # ── Change 7: Optional ZTF augmentation ───────────────────────────────────
+    # Gate: only trigger when the object would benefit from additional data
+    # and we haven't already fetched ZTF data externally.
+    df_obj = _maybe_augment_ztf(df_obj, char, config, provid)
+
+    # Re-characterise if augmented (source count may have changed)
+    if df_obj["source"].nunique() > char.n_sources:
+        char = characterise(df_obj)
+        logger.debug(
+            f"{provid}: post-ZTF regime={char.regime} "
+            f"N={char.n_obs} sources={char.n_sources}"
+        )
 
     # ── Preprocessing ─────────────────────────────────────────────────────────
     data = preprocess(df_obj, config)
@@ -292,6 +341,87 @@ def run_single_asteroid(
     if pdir:
         _precompute_save_all(provid, data, t1, t2, t3, rel, pdir)
     return result_to_row(data, t1, t2, t3, char=char, rel=rel)
+
+
+def _maybe_augment_ztf(
+    df_obj: pd.DataFrame,
+    char:   DataCharacterisation,
+    config: PipelineConfig,
+    provid: str,
+) -> pd.DataFrame:
+    """
+    Attempt ZTF augmentation when triggered by config and data quality.
+
+    Returns df_obj unchanged if ZTF is disabled, already combined, or
+    the fetch returns insufficient data.
+
+    Trigger criteria:
+      1. config.data.use_ztf is True
+      2. Current regime is "sparse" OR n_obs < ztf_trigger_n_obs
+      3. Not already "combined" (avoids double-augmentation)
+      4. At least ztf_min_obs ZTF observations returned
+
+    On any failure (network, Horizons, IRSA) logs a warning and returns
+    the original df_obj — the pipeline continues on Rubin-only data.
+    """
+    if not config.data.use_ztf:
+        return df_obj
+
+    # Already multi-source — don't augment again
+    if char.n_sources > 1 or char.regime == "combined":
+        return df_obj
+
+    # Only augment sparse or low-count objects
+    n_obs = char.n_obs
+    is_sparse    = char.regime == "sparse"
+    is_low_count = n_obs < config.data.ztf_trigger_n_obs
+
+    if not (is_sparse or is_low_count):
+        logger.debug(
+            f"{provid}: ZTF augmentation skipped "
+            f"(regime={char.regime}, n_obs={n_obs} >= {config.data.ztf_trigger_n_obs})"
+        )
+        return df_obj
+
+    logger.info(
+        f"{provid}: attempting ZTF augmentation "
+        f"(regime={char.regime}, n_obs={n_obs})"
+    )
+
+    try:
+        from sources.ztf import fetch_ztf, merge_with_rubin
+        df_ztf = fetch_ztf(
+            provid,
+            config=config,
+            date_start=config.data.ztf_date_start,
+            time_window_days=config.data.ztf_time_window_days,
+            apply_offsets=config.data.ztf_apply_offsets,
+        )
+
+        if len(df_ztf) < config.data.ztf_min_obs:
+            logger.info(
+                f"{provid}: ZTF returned {len(df_ztf)} observations "
+                f"(< {config.data.ztf_min_obs} minimum) — using Rubin only"
+            )
+            return df_obj
+
+        df_combined = merge_with_rubin(df_obj, df_ztf,
+                                       apply_offsets=config.data.ztf_apply_offsets)
+        logger.info(
+            f"{provid}: ZTF augmentation successful — "
+            f"{n_obs} Rubin + {len(df_ztf)} ZTF = {len(df_combined)} total"
+        )
+        return df_combined
+
+    except ImportError as e:
+        logger.warning(f"{provid}: ZTF augmentation skipped — {e}")
+        return df_obj
+    except Exception as e:
+        logger.warning(
+            f"{provid}: ZTF augmentation failed ({type(e).__name__}: {e}) "
+            f"— continuing on Rubin-only data"
+        )
+        return df_obj
 
 
 def setup_logging(config: PipelineConfig = DEFAULT_CONFIG) -> None:

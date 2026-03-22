@@ -198,6 +198,14 @@ def _post_process(df: pd.DataFrame, config: PipelineConfig) -> pd.DataFrame:
     Standardise column types, apply band filter, and sort.
     Called by both BigQuery and CSV loaders.
 
+    Source tagging (Change 7)
+    -------------------------
+    All rows loaded via this function are tagged as source="Rubin". This
+    allows characterise() to count n_sources via df["source"].nunique(),
+    which unlocks regime="combined" when ZTF data is later merged via
+    merge_with_rubin(). If a "source" column already exists in the input
+    (e.g. from a pre-tagged export), it is preserved.
+
     Band handling
     -------------
     Band names are normalised (remapped) BEFORE the bands_use filter is
@@ -227,11 +235,6 @@ def _post_process(df: pd.DataFrame, config: PipelineConfig) -> pd.DataFrame:
         logger.warning(f"Dropped {before - len(df)} rows with null values")
 
     # ── Apply band remap BEFORE filtering ─────────────────────────────────────
-    # Normalise short names (g/r/i/z/y/u) to canonical long names (Lg/Lr/...)
-    # so the bands_use filter always sees a consistent naming convention.
-    # If band_remap is empty (e.g. data is already in canonical form) this is
-    # a no-op. preprocessing.py also applies the same remap — the second
-    # application is harmless since Lg→Lg is not in the remap dict.
     if config.data.band_remap:
         df["band"] = df["band"].replace(config.data.band_remap)
 
@@ -244,6 +247,11 @@ def _post_process(df: pd.DataFrame, config: PipelineConfig) -> pd.DataFrame:
     # Apply quality cut on rmsmag
     df = df[df["rmsmag"] <= config.data.rmsmag_max].copy()
     df = df[df["rmsmag"] > 0].copy()
+
+    # ── Source tagging (Change 7) ──────────────────────────────────────────────
+    # Tag all Rubin-loaded rows. Preserved if already set (e.g. pre-tagged CSV).
+    if "source" not in df.columns:
+        df["source"] = "Rubin"
 
     df = df.sort_values(["provid", "mjd"]).reset_index(drop=True)
     return df

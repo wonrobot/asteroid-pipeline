@@ -57,6 +57,32 @@ class DataConfig:
     # High-albedo (E-type, V-type): 0.25
     hg_slope_G:   float = 0.15
 
+    # ── ZTF augmentation (Change 7) ───────────────────────────────────────────
+    # When use_ztf=True, pipeline.run_single_asteroid() fetches ZTF photometry
+    # from IRSA and merges it with Rubin data for objects in the sparse regime.
+    # Requires astroquery and internet access. Use False for bulk offline runs.
+    #
+    # Trigger criteria (all must hold before ZTF is fetched):
+    #   - regime == "sparse"  OR  n_obs < ztf_trigger_n_obs
+    #   - The object is NOT already in combined or rich_multiyear regime
+    #   - At least ztf_min_obs ZTF detections are returned
+    #
+    # Methodological principle: fetch/no-fetch is decided on data-quality
+    # criteria BEFORE running the period search, not after seeing a failure.
+    use_ztf:                     bool  = False
+    ztf_search_radius_arcsec:    float = 3.0    # cone radius for IRSA queries
+    ztf_n_ephemeris_points:      int   = 60     # Horizons probe density
+    ztf_time_window_days:        float = 0.4    # ±days around each probe epoch
+    ztf_min_obs:                 int   = 15     # minimum ZTF detections to use
+    ztf_trigger_n_obs:           int   = 40     # Rubin N_obs threshold to trigger
+    ztf_apply_offsets:           bool  = False  # apply ZTF→Rubin zero-point shift
+    ztf_date_start:              str   = "2018-03-01"  # ZTF survey start
+
+    # ── ATLAS augmentation (Change 7 Phase 4 — stub) ─────────────────────────
+    # ATLAS o/c bands are broadband — treated as independent periodogram check,
+    # not merged into the gri multiband fit. Not yet implemented.
+    use_atlas: bool = False
+
 
 # ── Period search ─────────────────────────────────────────────────────────────
 

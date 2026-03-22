@@ -68,8 +68,13 @@ ALIAS_PERIODS_HR = [
 ]
 ALIAS_TOLERANCE = 0.05   # 5%
 
-# Contamination score above which we treat a period as a cadence alias
-WINDOW_ALIAS_THRESHOLD = 0.5
+# Contamination score above which we treat a period as a cadence alias.
+# Validated against Greenstreet et al. 2026 ground truth: threshold=0.5 produced
+# false R=-1 flags on confirmed exact periods (MK23 6.174hr, MO35 6.286hr,
+# ML35 21.3hr, MU59 8.2hr, MA46 5.9hr — none near any real alias).
+# Raising to 0.7 eliminates those false positives while still catching
+# genuine alias contamination at the known daily/annual frequencies.
+WINDOW_ALIAS_THRESHOLD = 0.7
 
 
 # ── Output dataclass ──────────────────────────────────────────────────────────

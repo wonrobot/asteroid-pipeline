@@ -399,3 +399,56 @@ Without `heliodist`/`geodist`, the pipeline uses a quadratic polynomial to
 detrend the geometry effect. This is a reasonable approximation but will
 introduce ~0.05–0.1 mag systematic error in reduced magnitude. Adding distance
 columns from MPC/JPL Horizons is strongly recommended for production use.
+
+### Change 7 — Multi-survey data augmentation (ZTF, Phase 1–2)
+*Commits: (this commit)*
+
+Implements Phases 1 and 2 of the Change 7 roadmap described above.
+
+**Phase 1 — ZTF fetcher** (`src/sources/ztf.py`)
+- `fetch_ztf(provid, config, ...)` — ephemeris-based moving-object search:
+  gets predicted sky positions from JPL Horizons at N evenly-spaced epochs
+  across the ZTF baseline, then issues time-windowed cone searches at each
+  predicted position via the IRSA ZTF lightcurve REST API.
+- Handles all IRSA column name variants across ZTF data releases
+  (`mjd`/`jd`, `mag`/`psfmag`, `filtercode`/`bandname`/`fid`).
+- Deduplicates detections, applies catflags quality filter.
+- `merge_with_rubin(df_rubin, df_ztf)` — tags Rubin rows as `source="Rubin"`,
+  ZTF rows as `source="ZTF"`, sorts by MJD.
+- `apply_offsets=False` default — MBLS absorbs small zero-point differences
+  internally; only set True when feeding GLS/MHAOV directly.
+
+**Phase 2 — Source tagging and n_sources wiring**
+- **ingestion**: `_post_process()` now tags all loaded rows `source="Rubin"`.
+  Preserved if already set. One-line change, backward compatible.
+- **characterise**: `n_sources = df["source"].nunique()` (was hardcoded 1).
+  `DataCharacterisation` gains `n_sources: int` and `sources: List[str]`.
+  `_classify_regime()` returns `"combined"` when `n_sources > 1`.
+  The `combined` regime was previously unreachable; it is now fully active.
+- **config**: 8 new `DataConfig` fields — `use_ztf` (default `False`),
+  `ztf_search_radius_arcsec`, `ztf_n_ephemeris_points`, `ztf_time_window_days`,
+  `ztf_min_obs`, `ztf_trigger_n_obs`, `ztf_apply_offsets`, `ztf_date_start`.
+  `use_atlas` stub added for Phase 4. All defaults preserve existing behaviour.
+- **pipeline**: `run_single_asteroid()` gains `_maybe_augment_ztf()` gate.
+  Triggers when `use_ztf=True` AND `(regime=="sparse" OR n_obs < ztf_trigger_n_obs)`.
+  Decision is made on data-quality criteria BEFORE the period search (not after
+  seeing a failure). Fails gracefully on any network/API error.
+- **tests**: `tests/test_change7.py` — 46 tests covering all components.
+
+**Usage:**
+```python
+config = PipelineConfig(data=DataConfig(use_ztf=True))
+catalog = run_pipeline(df, config)
+```
+
+### Fix — WINDOW_ALIAS_THRESHOLD raised 0.5 → 0.7
+*Commits: (this commit)*
+
+Validated against Greenstreet et al. 2026 ground truth (76 objects):
+threshold=0.5 produced false R=-1 suppressions on confirmed exact-match
+periods: MK23 (6.174hr, 0.4% off), MO35 (6.286hr, 0.2% off), ML35
+(21.3hr, 0.2% off), MU59 (8.2hr, 0.3% off), MA46 (5.9hr, 0.4% off).
+None of these sit near a real alias. Raising to 0.7 eliminates the false
+positives while still flagging genuine contamination at daily/annual aliases.
+
+- **reliability**: `WINDOW_ALIAS_THRESHOLD` 0.5 → 0.7 with empirical justification.
