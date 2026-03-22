@@ -167,8 +167,8 @@ def compute_reliability(
 
     # ── Extract Tier 2 diagnostics ────────────────────────────────────────────
     agreement        = t2result.agreement
-    full_agreement   = (agreement is True)
-    two_of_three     = (agreement == "two_of_three")
+    # New agreement values: "mbls_confirmed" | "mbls_sig_only" | False
+    # (old "True" and "two_of_three" no longer produced by tier2)
     period_spread    = t2result.period_spread_pct
     mbls_raw         = getattr(t2result, 'best_period_mbls_raw', t2result.best_period_mbls)
     p_value          = t2result.p_value
@@ -351,14 +351,17 @@ def _compute_r_code(
     """
     Core R code decision logic. Returns (r_code, notes_string).
 
+    Agreement values (new):
+      "mbls_confirmed"  — MHAOV confirmed MBLS period + either gate significant
+      "mbls_sig_only"   — MBLS significant, MHAOV did not confirm (not sig or disagrees)
+      False             — rejected or routed to Tier 3
+
     Contamination modifier
     ----------------------
     When the consensus period has high window contamination
     (consensus_contamination > WINDOW_ALIAS_THRESHOLD) but is not
-    already flagged as an alias, we cap the R code at 2 and add a
-    note. This is a softer penalty than alias_risk (which forces R=-1)
-    because the period may still be real — the contamination just means
-    we can't rule out the cadence alias explanation.
+    already flagged as an alias, we cap R at 2. The period may still be
+    real — the contamination means we can't rule out the cadence alias.
     """
     ceiling_map = {"high": 3, "medium": 2, "low": 1, "unknown": 1}
     ceiling     = ceiling_map.get(reliability_ceiling, 1)
@@ -378,11 +381,7 @@ def _compute_r_code(
     if superfast_raw or superfast_adopted:
         ceiling = min(ceiling, 2)
 
-    # Contamination cap: high window contamination on the consensus period
-    # lowers the ceiling to R=2 even if all other criteria would give R=3.
-    # Rationale: if the adopted period sits on a cadence window peak, we
-    # can't distinguish "real signal at an unfortunate period" from
-    # "cadence alias mistaken for a signal".
+    # Contamination cap
     if (not np.isnan(consensus_contamination)
             and consensus_contamination > WINDOW_ALIAS_THRESHOLD
             and not alias_risk):
@@ -392,7 +391,7 @@ def _compute_r_code(
     if np.isnan(adopted_period):
         if not t2_passes and not t3_reliable:
             return 0, _note(
-                "No reliable period. Methods disagree at Tier 2 and "
+                "No reliable period. Tier 2 did not pass and "
                 "Tier 3 could not resolve ambiguity."
             )
         return 0, _note("No period adopted.")
@@ -404,112 +403,90 @@ def _compute_r_code(
             f"{alias_note}. Independent confirmation required."
         )
 
-    # T2 published
+    # ── T2 published ──────────────────────────────────────────────────────────
     if t2_passes:
-        two_of_three_flag = (agreement == "two_of_three")
 
-        if two_of_three_flag:
-            # CE disagrees — but evaluate how strongly multi-band MBLS supports
-            # the period. If multiple bands independently agree AND both
-            # significance gates fire, the CE disagreement is more likely a
-            # CE limitation (histogram under-sampling, especially for short
-            # baselines or fast rotators) than evidence against the period.
-            #
-            # Upgrade to R=2 only if ALL THREE conditions hold:
-            #   1. both_sig     — both MHAOV and MBLS find the signal significant
-            #   2. band_support_frac >= 0.67 — at least 2/3 of bands individually
-            #                                  prefer this period over flat model
-            #   3. regime not sparse — sparse data can't support multi-band claim
-            #
-            # Otherwise R=1 (unchanged from before).
-            strong_multiband = (
-                both_sig
-                and mbls_band_support_frac >= 0.67
-                and regime not in ("sparse", "unknown")
-            )
-            if strong_multiband:
-                r = 2
-                note = _note(
-                    f"MHAOV+MBLS agree (spread={period_spread*100:.1f}%), "
-                    f"CE disagrees. Both gates significant "
-                    f"(MHAOV p={p_value:.2e}, MBLS FAP={mbls_fap:.4f}). "
-                    f"{mbls_n_bands_supporting} of {int(round(1/mbls_band_support_frac * mbls_n_bands_supporting)) if mbls_band_support_frac > 0 else '?'} bands "
-                    f"individually support period (frac={mbls_band_support_frac:.2f}). "
-                    f"CE likely limited by histogram sampling. Moderate confidence (R=2)."
-                )
+        # ── Path A: MHAOV confirmed MBLS ──────────────────────────────────────
+        # Both methods point to the same period. R=3 requires both gates and
+        # a dense/rich regime. R=2 otherwise.
+        if agreement == "mbls_confirmed":
+            if regime in ("dense", "rich_multiyear", "combined"):
+                if both_sig:
+                    r = 3
+                    note = _note(
+                        f"MHAOV confirms MBLS period (spread={period_spread*100:.1f}%), "
+                        f"both gates significant "
+                        f"(MHAOV p={p_value:.2e}, MBLS FAP={mbls_fap:.4f}). "
+                        f"Dense regime. High confidence."
+                    )
+                elif p_value < 0.001:
+                    r = 2
+                    note = _note(
+                        f"MHAOV confirms MBLS period (spread={period_spread*100:.1f}%), "
+                        f"MHAOV p={p_value:.2e} significant, "
+                        f"MBLS FAP={mbls_fap:.4f} marginal. Moderate confidence."
+                    )
+                elif not np.isnan(mbls_fap) and mbls_fap < 0.001:
+                    r = 2
+                    note = _note(
+                        f"MHAOV confirms MBLS period (spread={period_spread*100:.1f}%), "
+                        f"MBLS FAP={mbls_fap:.4f} significant (multi-band), "
+                        f"MHAOV p={p_value:.2e} marginal. Moderate confidence."
+                    )
+                else:
+                    r = 1
+                    note = _note(
+                        f"MHAOV confirms MBLS period but neither gate strongly significant "
+                        f"(MHAOV p={p_value:.2e}, MBLS FAP={mbls_fap:.4f}). Tentative."
+                    )
             else:
-                r = 1
-                reasons = []
-                if not both_sig:
-                    reasons.append(f"not both gates significant "
-                                   f"(MHAOV p={p_value:.2e}, MBLS FAP={mbls_fap:.4f})")
-                if mbls_band_support_frac < 0.67:
-                    reasons.append(f"only {mbls_band_support_frac:.0%} of bands support period")
-                if regime in ("sparse", "unknown"):
-                    reasons.append(f"regime={regime}")
-                note = _note(
-                    f"MHAOV+MBLS agree (spread={period_spread*100:.1f}%), "
-                    f"CE disagrees. "
-                    + ("; ".join(reasons) + ". " if reasons else "")
-                    + "Publish as tentative (R=1)."
-                )
-            return min(r, ceiling), note
+                # sparse / unknown regime
+                if both_sig:
+                    r = 2
+                    note = _note(
+                        f"MHAOV confirms MBLS period (spread={period_spread*100:.1f}%), "
+                        f"both gates significant (MHAOV p={p_value:.2e}, "
+                        f"MBLS FAP={mbls_fap:.4f}), sparse regime. Moderate confidence."
+                    )
+                elif p_value < 0.001 or (not np.isnan(mbls_fap) and mbls_fap < 0.001):
+                    r = 2
+                    note = _note(
+                        f"MHAOV confirms MBLS period (spread={period_spread*100:.1f}%), "
+                        f"one gate significant (MHAOV p={p_value:.2e}, "
+                        f"MBLS FAP={mbls_fap:.4f}), sparse regime. Moderate confidence."
+                    )
+                else:
+                    r = 1
+                    note = _note(
+                        f"MHAOV confirms MBLS period but sparse data and both gates marginal "
+                        f"(MHAOV p={p_value:.2e}, MBLS FAP={mbls_fap:.4f}). Low confidence."
+                    )
 
-        if regime in ("dense", "rich_multiyear", "combined"):
-            if both_sig:
-                # Both MHAOV and MBLS independently confirm the period.
-                # MBLS uses all bands — this is the strongest possible evidence.
-                r = 3
-                note = _note(
-                    f"All 3 methods agree (spread={period_spread*100:.1f}%), "
-                    f"MHAOV p={p_value:.2e} and MBLS FAP={mbls_fap:.4f} both significant. "
-                    f"Dense regime. High confidence."
-                )
-            elif p_value < 0.001:
-                # Only MHAOV significant — MBLS FAP not available or marginal.
-                # Could be a single-band dominated dataset or unlucky permutations.
+        # ── Path B: MBLS significant, MHAOV does not confirm ─────────────────
+        # MBLS FAP directly tests whether multi-band power exceeds the noise
+        # null. FAP < 0.001 is real evidence for a period. MHAOV non-confirmation
+        # means the single-band collapsed series is less sensitive here — not that
+        # the period is wrong. R capped at 2 (no independent confirmation).
+        elif agreement == "mbls_sig_only":
+            if not np.isnan(mbls_fap) and mbls_fap < 0.001:
                 r = 2
                 note = _note(
-                    f"All 3 methods agree (spread={period_spread*100:.1f}%), "
-                    f"MHAOV p={p_value:.2e} significant, "
-                    f"MBLS FAP={mbls_fap:.4f} not confirmed. Moderate confidence."
-                )
-            elif not np.isnan(mbls_fap) and mbls_fap < 0.001:
-                # Only MBLS significant — MHAOV marginal (common for faint
-                # multi-band objects where single-band power is diluted).
-                r = 2
-                note = _note(
-                    f"All 3 methods agree (spread={period_spread*100:.1f}%), "
-                    f"MBLS FAP={mbls_fap:.4f} significant (multi-band), "
-                    f"MHAOV p={p_value:.2e} marginal. Moderate confidence."
+                    f"MBLS significant (FAP={mbls_fap:.4f}) — multi-band evidence. "
+                    f"MHAOV (p={p_value:.2e}) does not confirm this period; "
+                    f"single-band series less sensitive. "
+                    f"Period adopted from MBLS. Moderate confidence (R=2, no independent confirmation)."
                 )
             else:
                 r = 1
                 note = _note(
-                    f"Methods agree but neither gate strongly significant "
-                    f"(MHAOV p={p_value:.2e}, MBLS FAP={mbls_fap:.4f}). Tentative."
+                    f"MBLS marginally significant (FAP={mbls_fap:.4f}), "
+                    f"MHAOV (p={p_value:.2e}) does not confirm. Low confidence."
                 )
+
         else:
-            if both_sig:
-                r = 2
-                note = _note(
-                    f"All 3 methods agree (spread={period_spread*100:.1f}%), "
-                    f"both gates significant (MHAOV p={p_value:.2e}, "
-                    f"MBLS FAP={mbls_fap:.4f}), sparse regime. Moderate confidence."
-                )
-            elif p_value < 0.001 or (not np.isnan(mbls_fap) and mbls_fap < 0.001):
-                r = 2
-                note = _note(
-                    f"All 3 methods agree (spread={period_spread*100:.1f}%), "
-                    f"one gate significant (MHAOV p={p_value:.2e}, "
-                    f"MBLS FAP={mbls_fap:.4f}), sparse regime. Moderate confidence."
-                )
-            else:
-                r = 1
-                note = _note(
-                    f"Methods agree but sparse data and both gates marginal "
-                    f"(MHAOV p={p_value:.2e}, MBLS FAP={mbls_fap:.4f}). Low confidence."
-                )
+            # Fallback — should not normally reach here
+            r = 1
+            note = _note(f"T2 passed with unrecognised agreement value '{agreement}'.")
 
         # Append contamination note if ceiling was capped
         if (not np.isnan(consensus_contamination)

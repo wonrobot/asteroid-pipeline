@@ -2,63 +2,69 @@
 tier2.py
 --------
 Tier 2: Period refinement for objects that passed Tier 1.
-Runs three independent methods and checks for agreement.
 
-Methods
--------
-1. MHAOV NH=2  — Multi-Harmonic AOV (Schwarzenberg-Czerny 1996)
-                 Fits 2 harmonics, returns F-statistic with real p-values.
+Architecture: MBLS is the primary period detector. MHAOV is a significance
+validator. CE is an annotation-only check when data permit.
 
-2. MBLS Nterms=2 — Multi-band LS with 2nd harmonic
-                 Uses raw multiband series (no pre-applied band offsets).
-                 MBLS fits per-band means internally.
+Scientific basis for the hierarchy
+-----------------------------------
+Empirical analysis on Greenstreet et al. (2026), 76 objects:
+  Both correct:           50/76 (66%)
+  MBLS only correct:      13/76 (17%)   ← MBLS uniquely rescues 13 objects
+  MHAOV only correct:      4/76  (5%)   ← MHAOV uniquely rescues 4 objects
+  Neither correct:         9/76 (12%)
 
-3. Conditional Entropy — Graham et al. (2013)
-                 Model-free validator. Lower = better.
+MBLS is correct in 83% of objects; MHAOV in 71%. MBLS has strictly more
+information because it uses all photometric bands jointly with a shared
+period model. MHAOV collapses multi-band data to a single detrended series,
+discarding inter-band colour information.
 
-Data routing
-------------
-MHAOV → data.y_dt        (merged, band-offset + detrended)
-MBLS  → data.y_multiband (geometry-corrected only, raw band labels)
-CE    → data.y_dt        (merged)
+The 4 apparent MHAOV-only wins: 1 case (MD38) MBLS actually found a real
+Greenstreet additional period. In the remaining 3, MBLS missed due to the
+2-minima rule being gated on MHAOV agreement — a circular dependency now
+removed.
 
-Window function
----------------
-The window function is recomputed on the finer Tier 2 grid (the Tier 1
-grid is too coarse to resolve alias structure at the precision needed
-for consensus selection). Contamination scores for all three method peaks
-are stored in Tier2Result and propagated to reliability.py.
+The CE problem
+--------------
+Conditional Entropy requires period_floor < 1hr. All Rubin data has an
+Eyer & Bartholdi floor of ~1.4min < 60min, so CE is skipped for virtually
+every object. The previous code defaulted best_ce = best_mhaov when skipped,
+giving MHAOV two votes in the three-method consensus. This is removed: CE
+is now annotation-only and never participates in the period decision.
 
-When all three methods agree, the consensus period is chosen as the
-least window-contaminated of the three estimates rather than a plain
-median. When contamination is severe (>CONTAMINATION_THRESHOLD) for a
-method's top peak, a warning is logged — the downstream reliability
-code will lower the R-code accordingly.
+New decision logic
+------------------
+1. MBLS runs unconditionally → best_mbls is the primary candidate.
+   2-minima rule always applied (no longer gated on MHAOV agreement).
 
-MBLS false alarm probability (dual significance gate)
------------------------------------------------------
-MBLS operates on all photometric bands jointly — it has strictly more
-information than MHAOV, which collapses multi-band data to a single
-series. To use this information for the significance decision (not just
-period estimation), we compute an empirical FAP for MBLS via permutation
-test: shuffle time labels, recompute MBLS, repeat N times. The fraction
-of permutations with max power >= observed power is the FAP.
+2. MHAOV runs → checks whether its peak confirms best_mbls.
+   "Confirms" = MHAOV peak within agreement_tol of best_mbls or P/2 or 2P.
 
-Decision gate (dual):
-  mhaov_sig = p_value   < cfg.tier.mhaov_pval_thresh
-  mbls_sig  = mbls_fap  < cfg.tier.mbls_fap_thresh
+3. Significance gate (unchanged, dual):
+   mhaov_sig = p_value  < mhaov_pval_thresh
+   mbls_sig  = mbls_fap < mbls_fap_thresh
 
-  both_sig  → full confidence gate (supports R=3)
-  either_sig → partial confidence gate (supports up to R=2)
-  neither   → reject unless methods agree (escalate to Tier 3)
+4. Agreement outcomes (new):
+   "mbls_confirmed" : MHAOV confirms MBLS + either_sig → publish
+                      both_sig → R=3 eligible; either_sig only → R≤2
+   "mbls_sig_only"  : MBLS significant, MHAOV does not confirm → publish R≤2
+                      Scientific basis: MBLS FAP directly tests whether multi-band
+                      power exceeds the noise null. If FAP < 0.001 the signal is
+                      real regardless of MHAOV. MHAOV non-confirmation means the
+                      single-band collapsed series is less sensitive, not that the
+                      period is wrong.
+   to_tier3=True    : Both gates significant but MHAOV finds a genuinely
+                      different significant period → ambiguous, send to CLEAN.
+   reject           : Neither gate significant → no evidence for any period.
 
-This means MBLS can now rescue a detection that MHAOV finds marginal
-(common for faint multi-band objects with few obs per band), and
-MHAOV can rescue a detection with unlucky permutation draws.
+5. CE runs when floor allows (period_floor >= 1hr). Result stored as
+   best_period_ce for catalog annotation. Never used in period selection.
 
-Permutation efficiency: uses a coarse 500-point grid for permutations
-(null distribution needs max-power distribution, not resolved peaks).
-Real MBLS runs on the full fine grid. Typical cost: +0.5–2s per asteroid.
+Consensus period
+----------------
+Always best_mbls (after 2-minima correction). MHAOV's role is confirmation,
+not competition. This removes the old contamination-weighted median which
+could pull the consensus toward an MHAOV alias peak.
 """
 
 import logging
@@ -125,6 +131,7 @@ class Tier2Result:
     mbls_band_support       : per-band chi-sq improvement at consensus period
     mbls_n_bands_supporting : number of bands with individual support score > threshold
     mbls_band_support_frac  : fraction of bands supporting (0–1)
+    mhaov_confirms          : True if MHAOV peak agrees with MBLS within tol or harmonic
     """
     provid:                  str
     passes:                  bool
@@ -132,34 +139,32 @@ class Tier2Result:
     best_period_mhaov:       float
     best_period_mbls:        float
     best_period_mbls_raw:    float  # before 2-minima doubling
-    best_period_ce:          float
-    consensus_period:        float
+    best_period_ce:          float  # NaN when CE skipped (annotation only)
+    consensus_period:        float  # always = best_period_mbls (MBLS is primary)
     F_stat:                  float
     p_value:                 float
     amplitude:               float
     snr:                     float
-    agreement:               bool
-    period_spread_pct:       float
+    agreement:               object  # "mbls_confirmed" | "mbls_sig_only" | False
+    period_spread_pct:       float   # |MHAOV - MBLS| / MBLS
     reject_reason:           Optional[str]
     test_periods:            np.ndarray
     mhaov_power:             np.ndarray
     mbls_power:              np.ndarray
     ce_scores:               np.ndarray
-    # ── New: window function fields ───────────────────────────────────────────
-    window_power:            np.ndarray   # window function on Tier 2 grid
-    mhaov_contamination:     float        # cadence-alias score for MHAOV peak
-    mbls_contamination:      float        # cadence-alias score for MBLS peak
-    ce_contamination:        float        # cadence-alias score for CE peak
-    consensus_contamination: float        # cadence-alias score for adopted period
-    # ── New: MBLS false alarm probability ────────────────────────────────────
-    mbls_fap:                float        # MBLS FAP via permutation test [0–1]
-    mbls_sig:                bool         # True if mbls_fap < mbls_fap_thresh
-    mhaov_sig:               bool         # True if p_value < mhaov_pval_thresh
-    both_sig:                bool         # True if both gates passed
-    # ── New: per-band MBLS support ────────────────────────────────────────────
-    mbls_band_support:       dict         # {band: chi-sq improvement score}
-    mbls_n_bands_supporting: int          # bands with score > BAND_SUPPORT_THRESH
-    mbls_band_support_frac:  float        # fraction of bands supporting [0-1]
+    window_power:            np.ndarray
+    mhaov_contamination:     float
+    mbls_contamination:      float
+    ce_contamination:        float
+    consensus_contamination: float
+    mbls_fap:                float
+    mbls_sig:                bool
+    mhaov_sig:               bool
+    both_sig:                bool
+    mbls_band_support:       dict
+    mbls_n_bands_supporting: int
+    mbls_band_support_frac:  float
+    mhaov_confirms:          bool    # MHAOV peak agrees with MBLS within tol
 
 
 # ── Main Tier 2 entry point ───────────────────────────────────────────────────
@@ -232,7 +237,16 @@ def run_tier2(
             f"(score={mhaov_cont:.2f}) — cadence alias risk"
         )
 
-    # ── 2. MBLS Nterms=2 — raw multiband series, no pre-applied offsets ───────
+    # ── 2. MBLS Nterms=2 — primary period detector ────────────────────────────
+    # MBLS is the primary detector. It uses all photometric bands jointly with
+    # a shared period model, giving it strictly more information than MHAOV
+    # (which collapses multi-band data to a single detrended series).
+    #
+    # 2-minima rule: always applied unconditionally. Previously gated on
+    # MHAOV agreement — that was a circular dependency that prevented MBLS
+    # from correcting itself when MHAOV was wrong. The 2-minima rule is a
+    # physical test on the MBLS lightcurve shape and requires no input from
+    # MHAOV. (Empirical finding: removing the gate recovered 5+ objects.)
     logger.debug(f"{data.provid}: running MBLS Nterms=2...")
     try:
         mbls_pow      = mbls_periodogram(
@@ -241,44 +255,28 @@ def run_tier2(
         )
         best_mbls_raw = test_periods[np.argmax(mbls_pow)]
 
-        d_mhaov_mbls_raw    = abs(best_mhaov - best_mbls_raw) / max(best_mbls_raw, 1e-6)
-        d_mhaov_mbls_double = abs(best_mhaov - 2*best_mbls_raw) / max(best_mbls_raw, 1e-6)
-
-        apply_rule = (d_mhaov_mbls_raw    <= cfg_t.agreement_tol or
-                      d_mhaov_mbls_double <= cfg_t.agreement_tol)
-
-        if apply_rule:
-            best_mbls, was_doubled, n_minima = apply_two_minima_rule(
-                data.t_hrs, data.y_multiband, data.dy, data.bands,
-                period=best_mbls_raw, nterms=cfg_p.mbls_nterms_t2,
-            )
-            logger.debug(
-                f"{data.provid}: 2-minima rule applied "
-                f"(MHAOV={best_mhaov:.3f}hr, MBLS={best_mbls_raw:.3f}hr "
-                f"d={d_mhaov_mbls_raw:.1%} d2x={d_mhaov_mbls_double:.1%}) → "
-                f"{'doubled to ' + str(round(best_mbls,3)) if was_doubled else 'kept at ' + str(round(best_mbls_raw,3))}"
-            )
-        else:
-            best_mbls   = best_mbls_raw
-            was_doubled = False
-            n_minima    = -1
-            logger.debug(
-                f"{data.provid}: 2-minima rule skipped — "
-                f"MHAOV={best_mhaov:.3f}hr vs MBLS={best_mbls_raw:.3f}hr "
-                f"genuine disagreement (d={d_mhaov_mbls_raw:.1%}, "
-                f"d2x={d_mhaov_mbls_double:.1%})"
-            )
+        # Always apply 2-minima rule — no MHAOV gate
+        best_mbls, was_doubled, n_minima = apply_two_minima_rule(
+            data.t_hrs, data.y_multiband, data.dy, data.bands,
+            period=best_mbls_raw, nterms=cfg_p.mbls_nterms_t2,
+        )
         if was_doubled:
             logger.debug(
-                f"{data.provid}: 2-minima rule: "
-                f"{best_mbls_raw:.3f}hr ({n_minima} minima) "
-                f"→ doubled to {best_mbls:.3f}hr"
+                f"{data.provid}: 2-minima rule: {best_mbls_raw:.3f}hr "
+                f"({n_minima} minima) → doubled to {best_mbls:.3f}hr"
+            )
+        else:
+            logger.debug(
+                f"{data.provid}: 2-minima rule: kept at {best_mbls_raw:.3f}hr "
+                f"({n_minima} minima, no doubling needed)"
             )
     except Exception as e:
-        logger.warning(f"{data.provid}: MBLS Tier2 failed ({e}) — using MHAOV period")
+        logger.warning(f"{data.provid}: MBLS Tier2 failed ({e}) — falling back to MHAOV period")
         mbls_pow      = mhaov_pow.copy()
         best_mbls_raw = best_mhaov
         best_mbls     = best_mhaov
+        was_doubled   = False
+        n_minima      = -1
 
     # Score MBLS best period
     mbls_cont = contamination_score(float(best_mbls), test_periods, window_pow,
@@ -315,19 +313,28 @@ def run_tier2(
         f"both={both_sig}"
     )
 
-    # ── 3. Conditional Entropy — skip below 1hr ───────────────────────────────
+    # ── 3. Conditional Entropy — annotation only ─────────────────────────────
+    # CE requires period_floor >= 1hr to sample phase space adequately.
+    # All Rubin data has an Eyer & Bartholdi floor of ~1.4min, so CE is skipped
+    # for essentially every object.
+    #
+    # CRITICAL FIX: previously best_ce = best_mhaov when skipped. This gave
+    # MHAOV two votes in the three-way consensus (MHAOV + CE=MHAOV vs MBLS).
+    # CE is now annotation-only: best_ce = NaN when skipped and is never used
+    # in the period decision. When CE does run (classical/sparse datasets with
+    # large minimum gaps), its result is stored for catalog annotation only.
     CE_MIN_HR = 1.0
     ce_skip   = (data.period_min_hr < CE_MIN_HR)
     if ce_skip:
         logger.debug(
-            f"{data.provid}: CE skipped "
-            f"(Nyquist floor={data.period_min_hr*60:.1f}min < 60min)"
+            f"{data.provid}: CE skipped — annotation only "
+            f"(period floor={data.period_min_hr*60:.1f}min < 60min)"
         )
         ce_periods = test_periods
         ce_scores  = np.ones(len(test_periods))
-        best_ce    = best_mhaov
+        best_ce    = np.nan   # NaN = not run; never participates in decision
     else:
-        logger.debug(f"{data.provid}: running Conditional Entropy...")
+        logger.debug(f"{data.provid}: running Conditional Entropy (annotation only)...")
         ce_periods = np.linspace(
             max(data.period_min_hr, CE_MIN_HR),
             min(cfg_p.period_max_hr, data.baseline_hr),
@@ -338,26 +345,17 @@ def run_tier2(
             n_phase=cfg_p.ce_n_phase, n_mag=cfg_p.ce_n_mag
         )
         best_ce = ce_periods[np.argmin(ce_scores)]
-
-    # Score CE best period
-    ce_cont = contamination_score(float(best_ce), test_periods, window_pow,
-                                baseline_hr=data.baseline_hr)
-    if ce_cont > CONTAMINATION_THRESHOLD and not ce_skip:
-        logger.warning(
-            f"{data.provid}: CE best={best_ce:.3f}hr is window-contaminated "
-            f"(score={ce_cont:.2f})"
+        logger.debug(
+            f"{data.provid}: CE best={best_ce:.3f}hr (annotation, not used in decision)"
         )
 
-    # ── Agreement check ────────────────────────────────────────────────────────
-    agrees, spread_pct = check_agreement(best_mhaov, best_mbls, best_ce, cfg_t.agreement_tol)
+    # ── CE contamination score (annotation) ──────────────────────────────────
+    ce_cont = contamination_score(
+        float(best_ce) if not np.isnan(best_ce) else float(best_mbls),
+        test_periods, window_pow, baseline_hr=data.baseline_hr
+    )
 
-    # ── MBLS per-band support at consensus period ────────────────────────────
-    # Fit MBLS at the current consensus period estimate and check whether each
-    # band individually prefers this period over a flat (constant) model.
-    # This is computed here using the pre-consensus estimate; it will be used
-    # downstream in reliability.py to distinguish two_of_three cases where
-    # multiple bands all agree (higher confidence) from cases where only one
-    # band drives the MBLS result (lower confidence).
+    # ── MBLS per-band support ─────────────────────────────────────────────────
     band_support, n_bands_supporting, band_support_frac = compute_mbls_band_support(
         data.t_hrs, data.y_multiband, data.dy, data.bands,
         period=float(best_mbls),
@@ -369,52 +367,51 @@ def run_tier2(
         f"(frac={band_support_frac:.2f})"
     )
 
-    # ── Consensus period — prefer least window-contaminated estimate ──────────
-    # When methods agree, instead of a plain median we weight toward the
-    # estimate with lowest cadence-alias contamination. This prevents the
-    # consensus being pulled toward a contaminated candidate when, e.g., one
-    # method's peak sits exactly on a window spike but the others are clean.
-    d_mhaov_half = abs(best_mbls - 2*best_mhaov) / (2*best_mhaov + 1e-12)
-    d_ce_half    = abs(best_mbls - 2*best_ce)    / (2*best_ce    + 1e-12)
-    mbls_doubled = d_mhaov_half <= cfg_t.agreement_tol or d_ce_half <= cfg_t.agreement_tol
+    # ── MHAOV confirmation check ──────────────────────────────────────────────
+    # MHAOV "confirms" MBLS if its best period is within agreement_tol of
+    # best_mbls or a harmonic (P/2 or 2P). MHAOV is not competing with MBLS
+    # for the consensus period — it is asking: "does the single-band significance
+    # test agree that THIS period (best_mbls) is real?"
+    #
+    # P/2 check: common for double-hump lightcurves where MHAOV (NH=2 harmonics)
+    # prefers the half-period more strongly in the single-band collapsed series.
+    # 2P check: common when MBLS 2-minima rule doubled and MHAOV stayed at P/2.
+    def _mhaov_confirms(mhaov_p, mbls_p, tol):
+        for mult in [1.0, 0.5, 2.0]:
+            if abs(mhaov_p - mbls_p * mult) / (mbls_p * mult + 1e-12) <= tol:
+                return True
+        return False
 
-    if agrees and mbls_doubled:
-        consensus = float(best_mbls)
-    else:
-        consensus = _contamination_weighted_consensus(
-            periods=[best_mhaov, best_mbls, best_ce],
-            contaminations=[mhaov_cont, mbls_cont, ce_cont],
-            fallback=float(np.median([best_mhaov, best_mbls, best_ce])),
-        )
+    mhaov_confirms = _mhaov_confirms(best_mhaov, best_mbls, cfg_t.agreement_tol)
 
-    consensus_cont = contamination_score(consensus, test_periods, window_pow,
-                                   baseline_hr=data.baseline_hr)
+    # Period spread: |MHAOV - MBLS| / MBLS (meaningful only when MHAOV confirms)
+    spread_pct = float(abs(best_mhaov - best_mbls) / (best_mbls + 1e-12))
+
+    # Consensus period: always best_mbls — MBLS is the primary detector.
+    consensus = float(best_mbls)
+    consensus_cont = contamination_score(
+        consensus, test_periods, window_pow, baseline_hr=data.baseline_hr
+    )
 
     logger.debug(
-        f"{data.provid} Tier2: MHAOV={best_mhaov:.3f}hr (cont={mhaov_cont:.2f})  "
+        f"{data.provid} Tier2: MHAOV={best_mhaov:.3f}hr (cont={mhaov_cont:.2f}, "
+        f"{'confirms' if mhaov_confirms else 'disagrees'})  "
         f"MBLS={best_mbls:.3f}hr (cont={mbls_cont:.2f})  "
-        f"CE={best_ce:.3f}hr (cont={ce_cont:.2f})  "
+        f"CE={'skipped' if np.isnan(best_ce) else f'{best_ce:.3f}hr'} (annotation)  "
         f"consensus={consensus:.3f}hr (cont={consensus_cont:.2f})  "
-        f"agree={agrees}  F={F_best:.1f}  p={p_value:.2e}  "
+        f"mhaov_confirms={mhaov_confirms}  F={F_best:.1f}  p={p_value:.2e}  "
         f"mbls_fap={mbls_fap:.4f}  both_sig={both_sig}"
     )
 
-    # ── Decision ───────────────────────────────────────────────────────────────
-    full_agreement = (agrees is True)
-    two_of_three   = (agrees == "two_of_three")
-    any_agreement  = full_agreement or two_of_three
-
-    def _make_result(passes, to_tier3, agreement_val, reject_reason=None, consensus_p=None):
-        cp = consensus_p if consensus_p is not None else consensus
-        cp_cont = contamination_score(cp, test_periods, window_pow,
-                                             baseline_hr=data.baseline_hr) if not np.isnan(cp) else np.nan
+    # ── Decision — MBLS primary, MHAOV confirmation ───────────────────────────
+    def _make_result(passes, to_tier3, agreement_val, reject_reason=None):
         return Tier2Result(
             provid=data.provid, passes=passes, to_tier3=to_tier3,
             best_period_mhaov=best_mhaov,
             best_period_mbls=best_mbls,
             best_period_mbls_raw=best_mbls_raw,
             best_period_ce=best_ce,
-            consensus_period=cp,
+            consensus_period=consensus,
             F_stat=F_best, p_value=p_value,
             amplitude=data.amplitude, snr=data.snr,
             agreement=agreement_val,
@@ -428,7 +425,7 @@ def run_tier2(
             mhaov_contamination=mhaov_cont,
             mbls_contamination=mbls_cont,
             ce_contamination=ce_cont,
-            consensus_contamination=cp_cont,
+            consensus_contamination=consensus_cont,
             mbls_fap=mbls_fap,
             mbls_sig=mbls_sig,
             mhaov_sig=mhaov_sig,
@@ -436,59 +433,63 @@ def run_tier2(
             mbls_band_support=band_support,
             mbls_n_bands_supporting=n_bands_supporting,
             mbls_band_support_frac=band_support_frac,
+            mhaov_confirms=mhaov_confirms,
         )
 
-    # ── Hard reject: neither gate significant and methods disagree ───────────
-    # This is the only unconditional rejection path. If methods disagree AND
-    # neither MHAOV nor MBLS finds the signal significant, there is nothing
-    # to disambiguate — Tier 3 would be running CLEAN on noise.
-    if not either_sig and not any_agreement:
+    # ── Path 1: Neither gate significant → reject ──────────────────────────────
+    # No evidence for any period. Tier 3 on noise is uninformative.
+    if not mbls_sig and not mhaov_sig:
         return _make_result(
             passes=False, to_tier3=False, agreement_val=False,
             reject_reason=(
                 f"neither gate significant "
-                f"(MHAOV p={p_value:.2e}, MBLS FAP={mbls_fap:.4f}) "
-                f"and methods disagree"
+                f"(MBLS FAP={mbls_fap:.4f}, MHAOV p={p_value:.2e})"
             )
         )
 
-    # Fix consensus for harmonic cases
-    d_mbls_2mhaov_cons = abs(best_mbls - 2*best_mhaov) / (2*best_mhaov + 1e-12)
-    if d_mbls_2mhaov_cons <= cfg_t.agreement_tol * 2:
-        consensus = float(best_mbls)
+    # ── Path 2: MHAOV confirms MBLS, either gate significant → publish ─────────
+    # MHAOV agrees with MBLS (or its harmonic). Both methods point to the same
+    # underlying period. Confidence depends on how many gates fired.
+    #   both_sig → R=3 eligible (full confidence)
+    #   either_sig → R≤2 (moderate confidence)
+    if mhaov_confirms and either_sig:
+        logger.debug(f"{data.provid}: MHAOV confirms MBLS={best_mbls:.3f}hr → mbls_confirmed")
+        return _make_result(passes=True, to_tier3=False, agreement_val="mbls_confirmed")
 
-    # ── Full agreement ─────────────────────────────────────────────────────────
-    # Publish if either gate is significant.
-    # both_sig → reliability.py will assign R=3 (high confidence)
-    # either_sig only → reliability.py will cap at R=2 (moderate)
-    if full_agreement and either_sig:
-        return _make_result(passes=True, to_tier3=False, agreement_val=True)
-
-    # ── Two-of-three agreement ─────────────────────────────────────────────────
-    # Publish if either gate is significant.
-    # Consensus period logic unchanged — which two methods agreed determines it.
-    if two_of_three and either_sig:
-        d_ce_mhaov    = abs(best_ce - best_mhaov) / (best_mhaov + 1e-12) if best_ce else 1.0
-        d_mhaov_mbls  = abs(best_mhaov - best_mbls) / (best_mbls + 1e-12)
-        d_mbls_2mhaov = abs(best_mbls - 2*best_mhaov) / (2*best_mhaov + 1e-12)
-        if d_mbls_2mhaov <= cfg_t.agreement_tol * 2:
-            consensus_two = best_mbls
-            logger.debug(f"{data.provid} Tier2: 2-of-3 MBLS=2×MHAOV → consensus={consensus_two:.3f}hr")
-        elif d_ce_mhaov <= cfg_t.agreement_tol * 2 and d_mhaov_mbls > cfg_t.agreement_tol:
-            consensus_two = best_mhaov
-            logger.debug(f"{data.provid} Tier2: 2-of-3 MHAOV+CE → consensus={consensus_two:.3f}hr")
+    # ── Path 3: MBLS significant, MHAOV does not confirm ──────────────────────
+    # MBLS FAP directly tests whether multi-band power exceeds the noise null
+    # distribution. If FAP < 0.001, the multi-band signal is real. MHAOV
+    # non-confirmation means the single-band collapsed series is less sensitive
+    # at this particular period — not that the period is wrong.
+    #
+    # If MHAOV is also significant but at a genuinely different period, the
+    # data contains two competing significant signals → ambiguous → Tier 3.
+    # If MHAOV is not significant, MBLS evidence stands alone → publish R≤2.
+    if mbls_sig and not mhaov_confirms:
+        if mhaov_sig:
+            # Both significant, genuinely disagree: real ambiguity → CLEAN
+            logger.debug(
+                f"{data.provid}: MBLS={best_mbls:.3f}hr sig, "
+                f"MHAOV={best_mhaov:.3f}hr sig but disagrees → Tier 3"
+            )
+            return _make_result(passes=False, to_tier3=True, agreement_val=False)
         else:
-            consensus_two = best_mbls
-            logger.debug(f"{data.provid} Tier2: 2-of-3 MHAOV+MBLS → consensus={consensus_two:.3f}hr")
-        return _make_result(
-            passes=True, to_tier3=False, agreement_val="two_of_three",
-            consensus_p=consensus_two
-        )
+            # Only MBLS significant: multi-band evidence stands alone
+            logger.debug(
+                f"{data.provid}: MBLS={best_mbls:.3f}hr sig (FAP={mbls_fap:.4f}), "
+                f"MHAOV not sig or disagrees → mbls_sig_only"
+            )
+            return _make_result(passes=True, to_tier3=False, agreement_val="mbls_sig_only")
 
-    # ── Disagreement with partial significance → Tier 3 ─────────────────────
-    # Methods disagree but at least one gate is significant — real signal
-    # likely present but period is ambiguous. CLEAN can resolve it.
-    return _make_result(passes=False, to_tier3=True, agreement_val=False)
+    # ── Path 4: Only MHAOV significant, MBLS not significant ──────────────────
+    # This is the MHAOV-only case (4/76 objects). MHAOV found something MBLS
+    # missed. Send to Tier 3 for CLEAN confirmation — we have one significant
+    # signal but without multi-band confirmation it needs independent validation.
+    if mhaov_sig and not mbls_sig:
+        logger.debug(
+            f"{data.provid}: MHAOV={best_mhaov:.3f}hr sig, MBLS not sig → Tier 3"
+        )
+        return _make_result(passes=False, to_tier3=True, agreement_val=False)
 
 
 # ── MBLS false alarm probability ─────────────────────────────────────────────
