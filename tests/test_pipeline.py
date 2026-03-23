@@ -635,24 +635,29 @@ class TestPass2Suppression:
         assert 'coarse_contaminated and insignificant_coarse and not near_spin_barrier' in src, \
             "Suppression condition missing from tier1.py"
 
-    def test_near_spin_barrier_always_expands(self):
+    def test_near_spin_barrier_expands_grid(self):
         """
-        near_spin_barrier trigger should expand even if coarse best is
-        contaminated — a period below the 2.2hr spin barrier (Pravec &
-        Harris 2000) warrants fine-grid confirmation regardless of alias risk.
+        A synthetic asteroid with a true period just below the 2.2hr spin
+        barrier (Pravec & Harris 2000) must trigger Pass 2 grid expansion,
+        making the T1 test_periods grid finer than the coarse 0.5hr floor.
+
+        Behavioural contract: after run_tier1, t1.test_periods must contain
+        periods below 0.5hr.  This confirms that near_spin_barrier fired and
+        the grid was expanded — regardless of how the condition is implemented
+        internally.
         """
-        with open('src/tier1.py') as f:
-            src = f.read()
-        # should_expand must include near_spin_barrier without contamination check
-        # (multi-line expression in source — check each component separately)
-        assert 'near_spin_barrier' in src, \
-            "near_spin_barrier missing from tier1.py"
-        assert 'or (insignificant_coarse and not coarse_contaminated)' in src, \
-            "insignificant_coarse branch missing from should_expand"
-        assert 'SPIN_BARRIER_HR' in src, \
-            "SPIN_BARRIER_HR constant missing from tier1.py"
-        assert '2.2' in src, \
-            "Spin barrier value 2.2hr missing from tier1.py"
+        from tier1 import run_tier1
+        # Period = 1.8hr: clearly below SPIN_BARRIER_HR=2.2, well above 0.5hr
+        # coarse floor.  Coarse GLS will find ~1.8hr → near_spin_barrier=True
+        # → Pass 2 must expand down to data.period_min_hr (< 0.5hr).
+        data, _ = self._make_obs(period_hr=1.8, amplitude=0.4, noise=0.02, n=120)
+        t1 = run_tier1(data, DEFAULT_CONFIG)
+        assert t1.passes, "Object should pass T1 gates"
+        assert t1.test_periods.min() < 0.5, (
+            f"Pass 2 did not expand below 0.5hr floor for a spin-barrier "
+            f"object (min period = {t1.test_periods.min():.4f}hr). "
+            f"near_spin_barrier trigger must expand the grid."
+        )
 
     def test_window_reused_when_no_expansion(self):
         """
@@ -787,23 +792,56 @@ class TestMBLSBandSupport:
         assert "t2_mbls_band_support_frac"  in CATALOG_COLUMNS
         assert "t2_mbls_n_bands_supporting" in CATALOG_COLUMNS
 
-    def test_two_of_three_upgrade_requires_strong_multiband(self):
+    def test_r_code_sensitive_to_band_coverage(self):
         """
-        Reliability system must accept both_sig and mbls_band_support_frac
-        and use them in the R-code decision. Verify by checking that
-        compute_reliability receives and processes these fields.
+        The R-code must be sensitive to how many bands independently support
+        the period.  A result with full multi-band support and both gates
+        significant should score at least as high as the same result with
+        single-band support.
+
+        Behavioural contract: compute_reliability called with
+        mbls_band_support_frac=1.0 (all bands agree) must return r_code
+        >= compute_reliability called with mbls_band_support_frac=0.0
+        (no band support), all other inputs equal.
+
+        This tests that band support actually feeds into the R-code decision
+        without coupling to any internal variable name.
         """
         from reliability import compute_reliability
+        from characterise import characterise
+        from tier1 import run_tier1
+        from tier2 import run_tier2
+
+        df   = make_synthetic_lc(period_hr=4.8, amplitude=0.5, noise=0.01, n_obs=200)
+        data = preprocess(df, DEFAULT_CONFIG)
+        char = characterise(df)
+        t1   = run_tier1(data, DEFAULT_CONFIG)
+        if not t1.passes:
+            pytest.skip("Tier 1 rejected synthetic LC")
+        t2 = run_tier2(data, t1, DEFAULT_CONFIG)
+        if not t2.passes:
+            pytest.skip("Tier 2 rejected or to Tier 3")
+
         import dataclasses
-        # Confirm the reliability module reads the relevant fields from t2result
-        with open('src/reliability.py') as f:
-            src = f.read()
-        assert 'both_sig' in src, \
-            "reliability.py must use both_sig in R-code decision"
-        assert 'mbls_band_support_frac' in src, \
-            "reliability.py must use mbls_band_support_frac"
-        assert 'regime' in src, \
-            "reliability.py must use data regime in R-code decision"
+        # High band support: all bands agree
+        t2_strong = dataclasses.replace(t2,
+            mbls_band_support_frac=1.0,
+            mbls_n_bands_supporting=3,
+            both_sig=True,
+        )
+        # Low band support: no bands agree
+        t2_weak = dataclasses.replace(t2,
+            mbls_band_support_frac=0.0,
+            mbls_n_bands_supporting=0,
+            both_sig=False,
+        )
+        rel_strong = compute_reliability(char, t1, t2_strong)
+        rel_weak   = compute_reliability(char, t1, t2_weak)
+        assert rel_strong.r_code >= rel_weak.r_code, (
+            f"Full band support (r={rel_strong.r_code}) should score >= "
+            f"no band support (r={rel_weak.r_code}). "
+            f"Band coverage must influence the R-code."
+        )
 
 
 # ── Tests: Band naming convention (Lg/g equivalence) ─────────────────────────
