@@ -36,7 +36,7 @@ CATALOG_COLUMNS = [
     "provid", "run_timestamp",
     # Tier 1
     "t1_passes", "t1_gls_period_hr", "t1_gls_power", "t1_snr", "t1_n_obs",
-    "t1_reject_reason",
+    "t1_reject_reason", "t1_pass2_trigger",
     # Tier 2
     "t2_passes", "t2_to_tier3",
     "t2_mhaov_period_hr", "t2_mbls_period_hr", "t2_ce_period_hr",
@@ -44,6 +44,7 @@ CATALOG_COLUMNS = [
     "t2_mbls_band_support_frac", "t2_mbls_n_bands_supporting",
     "t2_amplitude_mag", "t2_agreement", "t2_period_spread_pct",
     "t2_mbls_top_periods", "t2_mbls_top_powers",
+    "t2_lrt_f_stat", "t2_lrt_p_value", "t2_lrt_doubled",
     # Tier 3
     "t3_ran", "t3_publish_tentative", "t3_needs_followup",
     "t3_adopted_period_hr", "t3_clean_period_hr",
@@ -109,6 +110,7 @@ def result_to_row(
         "t1_snr":         t1result.snr,
         "t1_n_obs":       t1result.n_obs,
         "t1_reject_reason": t1result.reject_reason,
+        "t1_pass2_trigger": getattr(t1result, "t1_pass2_trigger", None),
         # Metadata
         "n_bands":        data.n_bands,
         "baseline_hr":    data.baseline_hr,
@@ -139,6 +141,9 @@ def result_to_row(
             "t2_mbls_top_powers":   "|".join(
                 f"{pw:.6f}" for pw in getattr(t2result, "mbls_top_powers", [])
             ),
+            "t2_lrt_f_stat":   getattr(t2result, "lrt_f_stat",  np.nan),
+            "t2_lrt_p_value":  getattr(t2result, "lrt_p_value", np.nan),
+            "t2_lrt_doubled":  getattr(t2result, "lrt_doubled",  False),
         })
         # If Tier 2 passed (methods agreed), set final values here
         if t2result.passes:

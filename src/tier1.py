@@ -139,6 +139,7 @@ class Tier1Result:
     gls_contamination:   float        # cadence-alias score for best GLS period
     mbls_contamination:  float        # cadence-alias score for best MBLS period
     mbls_peaks:          np.ndarray   # top-N window-penalised MBLS peaks (hrs)
+    t1_pass2_trigger:    Optional[str]  # "A-spin_barrier"|"B-insignificant_fap"|"C-low_band_support"|None
 
 
 # ── Main Tier 1 entry point ───────────────────────────────────────────────────
@@ -295,10 +296,12 @@ def run_tier1(
             f"low power is likely alias suppression, not a fast rotator"
         )
 
+    pass2_trigger: Optional[str] = None
     if should_expand:
-        trigger = ("A-spin_barrier" if near_spin_barrier
-                   else "C-low_band_support" if low_band_support_coarse
-                   else "B-insignificant_fap")
+        pass2_trigger = ("A-spin_barrier" if near_spin_barrier
+                         else "C-low_band_support" if low_band_support_coarse
+                         else "B-insignificant_fap")
+        trigger = pass2_trigger  # keep local alias for existing log lines
         # Greenstreet-style grid: 5× oversampling for T1 speed (Tier 2 uses 100×)
         n_fast = min(50_000, max(cfg_p.n_grid_coarse,
                      int(5 * data.baseline_hr
@@ -411,6 +414,7 @@ def run_tier1(
         gls_contamination=gls_cont,
         mbls_contamination=mbls_cont,
         mbls_peaks=mbls_peak_periods,
+        t1_pass2_trigger=pass2_trigger,
     )
 
 
@@ -505,4 +509,5 @@ def _reject(
         gls_contamination=np.nan,
         mbls_contamination=np.nan,
         mbls_peaks=empty,
+        t1_pass2_trigger=None,
     )

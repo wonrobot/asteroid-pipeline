@@ -139,6 +139,9 @@ class Tier2Result:
     mbls_n_bands_supporting : number of bands with individual support score > threshold
     mbls_band_support_frac  : fraction of bands supporting (0–1)
     mhaov_confirms          : True if MHAOV peak agrees with MBLS within tol or harmonic
+    lrt_f_stat              : LRT nested F-statistic for 2-minima doubling (NaN if not run)
+    lrt_p_value             : LRT p-value for doubling (NaN if not run)
+    lrt_doubled             : True if the LRT (or prior) doubled the period
     """
     provid:                  str
     passes:                  bool
@@ -174,6 +177,9 @@ class Tier2Result:
     mhaov_confirms:          bool    # MHAOV peak agrees with MBLS within tol
     mbls_top_periods:        np.ndarray  # top-5 window-penalised MBLS peak periods (hrs)
     mbls_top_powers:         np.ndarray  # raw MBLS power at each top-5 peak
+    lrt_f_stat:              float       # LRT nested F-stat for period doubling
+    lrt_p_value:             float       # LRT p-value for period doubling
+    lrt_doubled:             bool        # True if period was doubled by LRT
 
 
 # ── Main Tier 2 entry point ───────────────────────────────────────────────────
@@ -271,9 +277,8 @@ def run_tier2(
 
         # 2-minima likelihood ratio test (Change 9, corrected Change 10).
         # alpha uses Bonferroni correction for n_objects tests (Change 10).
-        # Spin-barrier prior passed so symmetric double-humps above 2.2hr
-        # can be doubled when MHAOV independently confirms P/2 (Change 10).
-        best_mbls, was_doubled, n_minima = apply_two_minima_lrt(
+        # Spin-barrier prior removed (Change 12) — LRT decides unconditionally.
+        best_mbls, was_doubled, n_minima, lrt_pval = apply_two_minima_lrt(
             data.t_hrs, data.y_multiband, data.dy, data.bands,
             period=best_mbls_raw, nterms=cfg_p.mbls_nterms_t2,
             n_objects=cfg_t.lrt_n_objects,
@@ -283,12 +288,12 @@ def run_tier2(
         if was_doubled:
             logger.debug(
                 f"{data.provid}: LRT 2-minima: {best_mbls_raw:.3f}hr "
-                f"→ doubled to {best_mbls:.3f}hr (F={n_minima:.2f})"
+                f"→ doubled to {best_mbls:.3f}hr (F={n_minima:.2f} p={lrt_pval:.2e})"
             )
         else:
             logger.debug(
                 f"{data.provid}: LRT 2-minima: kept at {best_mbls_raw:.3f}hr "
-                f"(F={n_minima:.2f}, no doubling)"
+                f"(F={n_minima:.2f} p={lrt_pval:.2e}, no doubling)"
             )
     except Exception as e:
         logger.warning(f"{data.provid}: MBLS Tier2 failed ({e}) — falling back to MHAOV period")
@@ -297,6 +302,7 @@ def run_tier2(
         best_mbls     = best_mhaov
         was_doubled   = False
         n_minima      = -1
+        lrt_pval      = np.nan
 
     # Score MBLS best period
     mbls_cont = contamination_score(float(best_mbls), test_periods, window_pow,
@@ -475,6 +481,9 @@ def run_tier2(
             mhaov_confirms=mhaov_confirms,
             mbls_top_periods=_mbls_top_periods,
             mbls_top_powers=_mbls_top_powers,
+            lrt_f_stat=float(n_minima),
+            lrt_p_value=float(lrt_pval),
+            lrt_doubled=bool(was_doubled),
         )
 
     # ── Path 1: Neither gate significant → reject ──────────────────────────────
@@ -1054,21 +1063,17 @@ def apply_two_minima_lrt(
     # ── Bonferroni correction ─────────────────────────────────────────────────
     alpha_eff = (alpha / n_objects) if n_objects > 0 else alpha
 
-    # ── Spin-barrier prior: symmetric double-hump check ───────────────────────
-    # Before running the LRT, check whether MHAOV independently confirms P/2.
-    # If so, double immediately — no need for the F-test.
-    if (period > spin_barrier_hr
-            and not np.isnan(mhaov_period)
-            and mhaov_period > 0):
-        tol = 0.10
-        p_half = period / 2.0
-        if abs(mhaov_period - p_half) / (p_half + 1e-12) <= tol:
-            logger.debug(
-                f"LRT 2-minima: spin-barrier prior triggered — "
-                f"MHAOV={mhaov_period:.3f}hr confirms P/2={p_half:.3f}hr "
-                f"of MBLS={period:.3f}hr (>{spin_barrier_hr}hr) → doubling"
-            )
-            return period * 2.0, True, 0.0   # f_stat=0 flags prior-driven
+    # NOTE (Change 12): the spin-barrier prior that previously bypassed the
+    # F-test has been removed.  The prior condition
+    #   (period > 2.2hr AND MHAOV ≈ P/2)  →  double unconditionally
+    # was mathematically circular: MHAOV with NH=2 spans {cos(2πt/P),
+    # cos(4πt/P)} and cos(4πt/P) ≡ cos(2πt/(P/2)).  MHAOV preferring P/2
+    # is a guaranteed consequence of the harmonic structure, not independent
+    # corroboration.  The prior also over-doubled ~5 correct detections
+    # (MG17, MH75, MQ58, MV46, MW70).  For symmetric double-humps (equal
+    # minima), the LRT correctly returns F≈0 and the period stays at P/2 of
+    # truth — the scientifically honest result when photometry cannot
+    # distinguish the two.  See Change 12 notes.
 
     N = len(t)
     w = 1.0 / dy**2
@@ -1116,7 +1121,7 @@ def apply_two_minima_lrt(
         logger.debug(
             f"LRT 2-minima: chi2_H1=0 at {period*2:.3f}hr — degenerate, doubling"
         )
-        return period * 2.0, True, np.inf
+        return period * 2.0, True, np.inf, 0.0
 
     f_stat  = (improvement / df_extra) / (chi2_H1 / df_resid)
     p_value = float(1.0 - f_dist.cdf(f_stat, df_extra, df_resid))
@@ -1126,13 +1131,13 @@ def apply_two_minima_lrt(
             f"LRT 2-minima: F={f_stat:.2f} p={p_value:.2e} < alpha_eff={alpha_eff:.2e} "
             f"→ doubling {period:.3f}hr → {period*2:.3f}hr"
         )
-        return period * 2.0, True, f_stat
+        return period * 2.0, True, f_stat, p_value
     else:
         logger.debug(
             f"LRT 2-minima: F={f_stat:.2f} p={p_value:.2e} ≥ alpha_eff={alpha_eff:.2e} "
             f"→ keeping {period:.3f}hr"
         )
-        return period, False, f_stat
+        return period, False, f_stat, p_value
 
 
 def apply_two_minima_rule(
