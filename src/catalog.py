@@ -44,7 +44,7 @@ CATALOG_COLUMNS = [
     "t2_mbls_band_support_frac", "t2_mbls_n_bands_supporting",
     "t2_amplitude_mag", "t2_agreement", "t2_period_spread_pct",
     "t2_mbls_top_periods", "t2_mbls_top_powers",
-    "t2_lrt_f_stat", "t2_lrt_p_value", "t2_lrt_doubled",
+    "t2_was_doubled",
     # Tier 3
     "t3_ran", "t3_publish_tentative", "t3_needs_followup",
     "t3_adopted_period_hr", "t3_clean_period_hr",
@@ -141,9 +141,7 @@ def result_to_row(
             "t2_mbls_top_powers":   "|".join(
                 f"{pw:.6f}" for pw in getattr(t2result, "mbls_top_powers", [])
             ),
-            "t2_lrt_f_stat":   getattr(t2result, "lrt_f_stat",  np.nan),
-            "t2_lrt_p_value":  getattr(t2result, "lrt_p_value", np.nan),
-            "t2_lrt_doubled":  getattr(t2result, "lrt_doubled",  False),
+            "t2_was_doubled":  getattr(t2result, "was_doubled", False),
         })
         # If Tier 2 passed (methods agreed), set final values here
         if t2result.passes:

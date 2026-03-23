@@ -1,77 +1,53 @@
 """
 tier2.py
 --------
-Tier 2: Period refinement for objects that passed Tier 1.
+Tier 2: Period refinement on a fine frequency grid.
 
-Architecture: MBLS is the primary period detector. MHAOV is a significance
-validator. CE is an annotation-only check when data permit.
+Architecture
+------------
+Two independent period-finding methods run on the same fine grid:
 
-Scientific basis for the hierarchy
------------------------------------
-Empirical analysis on Greenstreet et al. (2026), 76 objects:
-  Both correct:           50/76 (66%)
-  MBLS only correct:      13/76 (17%)   ← MBLS uniquely rescues 13 objects
-  MHAOV only correct:      4/76  (5%)   ← MHAOV uniquely rescues 4 objects
-  Neither correct:         9/76 (12%)
+  MBLS (VanderPlas & Ivezic 2015)
+    Multi-band Lomb-Scargle, Nterms=2 (double-hump model).
+    Primary detector. Fits a shared period with per-band amplitude
+    and mean — exploits all colour information jointly.
 
-MBLS is correct in 83% of objects; MHAOV in 71%. MBLS has strictly more
-information because it uses all photometric bands jointly with a shared
-period model. MHAOV collapses multi-band data to a single detrended series,
-discarding inter-band colour information.
+  MHAOV (Schwarzenberg-Czerny 1996)
+    Multi-Harmonic Analysis of Variance, NH=2-4 adaptive.
+    Corroboration method. Collapses multi-band data to a single
+    detrended series and applies ANOVA significance test.
 
-The 4 apparent MHAOV-only wins: 1 case (MD38) MBLS actually found a real
-Greenstreet additional period. In the remaining 3, MBLS missed due to the
-2-minima rule being gated on MHAOV agreement — a circular dependency now
-removed.
+Period-doubling decision
+------------------------
+MBLS raw period P_raw may be the half-period of the true rotation
+(common for symmetric double-hump lightcurves where both minima are
+equally deep). To resolve this we compare MHAOV's independent
+estimate against P_raw:
 
-The CE problem
+  MHAOV ≈ 2 × P_raw  →  adopt 2 × P_raw as consensus
+  otherwise           →  keep P_raw
+
+This is the minimal, explainable rule. Two independent methods
+finding periods in a 2:1 ratio is direct evidence of doubling.
+
+Decision paths
 --------------
-Conditional Entropy requires period_floor < 1hr. All Rubin data has an
-Eyer & Bartholdi floor of ~1.4min < 60min, so CE is skipped for virtually
-every object. The previous code defaulted best_ce = best_mhaov when skipped,
-giving MHAOV two votes in the three-method consensus. This is removed: CE
-is now annotation-only and never participates in the period decision.
+  mbls_confirmed  : MHAOV confirms MBLS consensus (within tol or harmonic)
+                    + at least one significance gate passes → publish
+  mbls_sig_only   : MBLS significant, MHAOV does not confirm → publish R≤2
+  to_tier3=True   : both gates pass but MHAOV finds a genuinely different
+                    period → ambiguous, send to Tier 3
+  reject          : neither gate significant → no detectable period
 
-New decision logic
-------------------
-1. MBLS runs unconditionally → best_mbls_raw is the primary candidate.
-
-2. LRT gate (Change 13): check if MHAOV confirms best_mbls_raw within tol.
-   - MHAOV confirms raw → skip LRT, keep best_mbls_raw.  Two independent
-     methods (MBLS multiband + MHAOV single-band) agreeing is stronger
-     evidence than the LRT sub-fundamental test.  LRT precision was 38%
-     when run unconditionally (10/26 correct doublings in Change 12 run).
-   - MHAOV disagrees → run LRT as tiebreaker to resolve the ambiguity.
-
-3. MHAOV runs → checks whether its peak confirms best_mbls (post-LRT).
-   "Confirms" = MHAOV peak within agreement_tol of best_mbls or P/2 or 2P.
-
-4. Significance gate (unchanged, dual):
-   mhaov_sig = p_value  < mhaov_pval_thresh
-   mbls_sig  = mbls_fap < mbls_fap_thresh
-
-5. Agreement outcomes:
-   "mbls_confirmed" : MHAOV confirms MBLS + either_sig → publish
-                      both_sig → R=3 eligible; either_sig only → R≤2
-   "mbls_sig_only"  : MBLS significant, MHAOV does not confirm → publish R≤2
-   to_tier3=True    : Both gates significant but MHAOV finds a genuinely
-                      different significant period → ambiguous, send to CLEAN.
-   reject           : Neither gate significant → no evidence for any period.
-
-6. CE runs when floor allows (period_floor >= 1hr). Result stored as
-   best_period_ce for catalog annotation. Never used in period selection.
-
-Consensus period
-----------------
-Always best_mbls (after 2-minima correction). MHAOV's role is confirmation,
-not competition. This removes the old contamination-weighted median which
-could pull the consensus toward an MHAOV alias peak.
+Conditional Entropy (CE, Cincotta et al. 1999) runs as annotation only
+when the period floor supports it. It never participates in the decision.
 """
 
 import logging
 import numpy as np
 from dataclasses import dataclass
 from typing import Optional, Tuple
+
 from scipy.stats import f as f_dist
 
 from gatspy.periodic import LombScargleMultiband
@@ -82,22 +58,15 @@ from tier1 import Tier1Result, mbls_periodogram
 from window import (
     compute_window_function,
     contamination_score,
+    window_informed_peaks,
     CONTAMINATION_THRESHOLD,
 )
 
 logger = logging.getLogger(__name__)
 
-# Minimum per-band chi-sq improvement to count a band as 'supporting' the period.
-# 0.1 = weak but real signal in that band. Deliberately low — we want to know
-# if the band has ANY preference for this period, not if it alone would detect it.
+# Threshold for MBLS per-band chi-sq improvement to count a band as
+# supporting the consensus period.
 BAND_SUPPORT_THRESH = 0.10
-
-# Rubble-pile spin barrier (Pravec & Harris 2000).
-# Objects above this period are assumed to be rubble piles expected to show
-# double-hump lightcurves.  Used by the LRT spin-barrier prior: if the raw
-# MBLS period is above this and MHAOV independently confirms the half-period,
-# double even if the LRT F-test is not significant (symmetric double hump).
-SPIN_BARRIER_HR = 2.2
 
 
 # ── Output dataclass ──────────────────────────────────────────────────────────
@@ -109,55 +78,57 @@ class Tier2Result:
 
     Attributes
     ----------
-    provid              : asteroid designation
-    passes              : True = all methods agree, proceed to publish
-    to_tier3            : True = methods disagree, needs disambiguation
-    best_period_mhaov   : MHAOV best period (hours)
-    best_period_mbls    : MBLS Nterms=2 best period (hours)
-    best_period_ce      : Conditional Entropy best period (hours)
-    consensus_period    : best-period estimate from the agreeing methods
-    F_stat              : MHAOV F-statistic at best period
-    p_value             : MHAOV p-value at best period
-    amplitude           : peak-to-peak of detrended lightcurve
-    snr                 : signal-to-noise ratio
-    agreement           : True / "two_of_three" / False
-    period_spread_pct   : max fractional spread between the three periods
-    reject_reason       : explanation if not passes and not to_tier3
-    test_periods        : period grid
-    mhaov_power         : MHAOV F-statistic array
-    mbls_power          : MBLS power array
-    ce_scores           : conditional entropy array (lower = better)
-    window_power        : spectral window function on test_periods grid
-    mhaov_contamination : cadence-alias score for MHAOV best period [0–1]
-    mbls_contamination  : cadence-alias score for MBLS best period [0–1]
-    ce_contamination    : cadence-alias score for CE best period [0–1]
-    consensus_contamination : cadence-alias score for adopted consensus [0–1]
-    mbls_fap                : MBLS false alarm probability via permutation [0–1]
-    mbls_sig                : True if mbls_fap < cfg.tier.mbls_fap_thresh
-    mhaov_sig               : True if p_value  < cfg.tier.mhaov_pval_thresh
-    both_sig                : True if both significance gates passed
-    mbls_band_support       : per-band chi-sq improvement at consensus period
-    mbls_n_bands_supporting : number of bands with individual support score > threshold
-    mbls_band_support_frac  : fraction of bands supporting (0–1)
-    mhaov_confirms          : True if MHAOV peak agrees with MBLS within tol or harmonic
-    lrt_f_stat              : LRT nested F-statistic for 2-minima doubling (NaN if not run)
-    lrt_p_value             : LRT p-value for doubling (NaN if not run)
-    lrt_doubled             : True if the LRT (or prior) doubled the period
+    provid               : asteroid designation
+    passes               : True = methods agree, proceed to publish
+    to_tier3             : True = methods disagree, needs disambiguation
+    best_period_mhaov    : MHAOV best period (hours)
+    best_period_mbls_raw : MBLS best period before doubling check (hours)
+    best_period_mbls     : MBLS consensus period after doubling check (hours)
+    best_period_ce       : CE best period (hours, NaN if not run)
+    consensus_period     : adopted period = best_period_mbls
+    was_doubled          : True if MHAOV indicated 2×P_raw
+    F_stat               : MHAOV F-statistic at best period
+    p_value              : MHAOV p-value at best period
+    amplitude            : peak-to-peak amplitude (mag)
+    snr                  : signal-to-noise ratio
+    agreement            : "mbls_confirmed" | "mbls_sig_only" | False
+    period_spread_pct    : |MHAOV - MBLS| / MBLS after doubling
+    reject_reason        : explanation if passes=False and to_tier3=False
+    test_periods         : period grid used
+    mhaov_power          : MHAOV F-statistic array
+    mbls_power           : MBLS power array
+    ce_scores            : CE score array (NaN array if not run)
+    window_power         : spectral window function on test_periods
+    mhaov_contamination  : cadence-alias score for MHAOV period [0-1]
+    mbls_contamination   : cadence-alias score for MBLS period [0-1]
+    ce_contamination     : cadence-alias score for CE period [0-1]
+    consensus_contamination : cadence-alias score for consensus [0-1]
+    mbls_fap             : MBLS false alarm probability via permutation [0-1]
+    mbls_sig             : True if mbls_fap < cfg.tier.mbls_fap_thresh
+    mhaov_sig            : True if p_value < cfg.tier.mhaov_pval_thresh
+    both_sig             : True if both significance gates passed
+    mbls_band_support    : per-band chi-sq improvement dict
+    mbls_n_bands_supporting : bands with improvement > BAND_SUPPORT_THRESH
+    mbls_band_support_frac  : fraction of bands supporting [0-1]
+    mhaov_confirms       : True if MHAOV agrees with consensus within tol
+    mbls_top_periods     : top-5 window-penalised MBLS peak periods (hrs)
+    mbls_top_powers      : MBLS power at each top-5 peak
     """
     provid:                  str
     passes:                  bool
     to_tier3:                bool
     best_period_mhaov:       float
+    best_period_mbls_raw:    float
     best_period_mbls:        float
-    best_period_mbls_raw:    float  # before 2-minima doubling
-    best_period_ce:          float  # NaN when CE skipped (annotation only)
-    consensus_period:        float  # always = best_period_mbls (MBLS is primary)
+    best_period_ce:          float
+    consensus_period:        float
+    was_doubled:             bool
     F_stat:                  float
     p_value:                 float
     amplitude:               float
     snr:                     float
-    agreement:               object  # "mbls_confirmed" | "mbls_sig_only" | False
-    period_spread_pct:       float   # |MHAOV - MBLS| / MBLS
+    agreement:               object
+    period_spread_pct:       float
     reject_reason:           Optional[str]
     test_periods:            np.ndarray
     mhaov_power:             np.ndarray
@@ -175,12 +146,9 @@ class Tier2Result:
     mbls_band_support:       dict
     mbls_n_bands_supporting: int
     mbls_band_support_frac:  float
-    mhaov_confirms:          bool    # MHAOV peak agrees with MBLS within tol
-    mbls_top_periods:        np.ndarray  # top-5 window-penalised MBLS peak periods (hrs)
-    mbls_top_powers:         np.ndarray  # raw MBLS power at each top-5 peak
-    lrt_f_stat:              float       # LRT nested F-stat for period doubling
-    lrt_p_value:             float       # LRT p-value for period doubling
-    lrt_doubled:             bool        # True if period was doubled by LRT
+    mhaov_confirms:          bool
+    mbls_top_periods:        np.ndarray
+    mbls_top_powers:         np.ndarray
 
 
 # ── Main Tier 2 entry point ───────────────────────────────────────────────────
@@ -191,309 +159,169 @@ def run_tier2(
     config:   PipelineConfig = DEFAULT_CONFIG,
 ) -> Tier2Result:
     """
-    Run Tier 2 period refinement on a single asteroid.
-    """
-    if not t1result.passes:
-        raise ValueError(f"{data.provid}: Tier 1 did not pass — cannot run Tier 2")
+    Run Tier 2 period refinement on a fine frequency grid.
 
+    Parameters
+    ----------
+    data     : preprocessed asteroid data
+    t1result : Tier 1 result (provides period grid bounds via mbls_peaks)
+    config   : pipeline configuration
+
+    Returns
+    -------
+    Tier2Result
+    """
     cfg_p = config.period
     cfg_t = config.tier
+    empty = np.array([])
 
-    # Fine period grid — Greenstreet et al. (2026) Equation 4:
-    #   n = 100 × T_days × (f_max − f_min)
-    #   = 100 × T_hrs × (1/P_min_hrs − 1/P_max_hrs)
-    #
-    # Grid lower bound is derived from the LOWEST of all significant T1 MBLS
-    # peaks rather than the single argmax.  Previously the grid was anchored at
-    # t1_best/4, which committed Tier 2 to the same alias that Tier 1 found.
-    # Using min(t1result.mbls_peaks)/4 means that if T1 found peaks at e.g.
-    # [3.0hr, 6.5hr, 12.1hr], the grid starts at 0.75hr and covers all three
-    # peaks and their full periods — no single-peak commitment.
-    t1_best  = t1result.best_period_mbls
-    t1_peaks = t1result.mbls_peaks  # top-N window-penalised, length >= 1
-    t1_lowest_peak = float(np.min(t1_peaks)) if len(t1_peaks) > 0 else t1_best
-
-    if t1_best < 0.5:
-        p_min = data.period_min_hr   # full range — genuine fast rotator
-        n_cap = 100_000              # allow dense grid for sub-hour periods
-    else:
-        p_min = max(data.period_min_hr, t1_lowest_peak / 4.0)
-        n_cap = 50_000
+    # ── Fine period grid ──────────────────────────────────────────────────────
+    # Lower bound: min of all significant T1 MBLS peaks / 4, so the fine
+    # grid covers any sub-harmonic the coarse grid may have found.
+    p_min = float(np.min(t1result.mbls_peaks)) / 4.0 if len(t1result.mbls_peaks) else data.period_min_hr
+    p_min = max(p_min, data.period_min_hr)
     p_max = min(cfg_p.period_max_hr, data.baseline_hr)
-    # Greenstreet Eq. 4: n = 100 × T × (f_max − f_min)
-    n_t2  = max(cfg_p.n_grid_fine,
-                int(100 * data.baseline_hr * (1.0/p_min - 1.0/p_max)))
-    n_t2  = min(n_t2, n_cap)
+
+    n_t2  = int(100 * data.baseline_hr * (1.0 / p_min - 1.0 / p_max))
+    n_t2  = max(min(n_t2, 100_000), cfg_p.n_grid_coarse)
     test_periods = np.linspace(p_min, p_max, n_t2)
 
-    # ── Window function on Tier 2 grid ────────────────────────────────────────
-    # Recomputed on the finer grid — the Tier 1 grid is too coarse to
-    # resolve alias structure at the precision needed for consensus selection.
-    # This is the same data.t_hrs so the window shape is identical; only the
-    # resolution improves. Cost is one GLS-on-ones call: negligible vs methods.
+    # ── Window function ───────────────────────────────────────────────────────
     window_pow = compute_window_function(data.t_hrs, test_periods)
 
-    # ── 1. MHAOV adaptive NH — merged series ──────────────────────────────────
+    # ── 1. MHAOV ──────────────────────────────────────────────────────────────
     logger.debug(f"{data.provid}: running MHAOV adaptive NH=2-4...")
     mhaov_pow, best_mhaov, F_best, best_nh = mhaov_periodogram_adaptive(
         data.t_hrs, data.y_dt, data.dy, test_periods,
         nh_min=cfg_p.mhaov_nh, nh_max=4, n_top_peaks=10, f_pval_thresh=0.10,
     )
     if best_nh > cfg_p.mhaov_nh:
-        logger.debug(
-            f"{data.provid}: MHAOV upgraded NH={cfg_p.mhaov_nh}→{best_nh} "
-            f"at {best_mhaov:.3f}hr"
-        )
+        logger.debug(f"{data.provid}: MHAOV upgraded NH={cfg_p.mhaov_nh}→{best_nh} at {best_mhaov:.3f}hr")
 
     df_model = 2 * cfg_p.mhaov_nh
     df_resid = data.n_obs - 2 * cfg_p.mhaov_nh - 1
     p_value  = float(1.0 - f_dist.cdf(F_best, df_model, max(df_resid, 1)))
 
-    # Score MHAOV best period for window contamination
     mhaov_cont = contamination_score(best_mhaov, test_periods, window_pow,
-                                   baseline_hr=data.baseline_hr)
+                                     baseline_hr=data.baseline_hr)
     if mhaov_cont > CONTAMINATION_THRESHOLD:
-        logger.warning(
-            f"{data.provid}: MHAOV best={best_mhaov:.3f}hr is window-contaminated "
-            f"(score={mhaov_cont:.2f}) — cadence alias risk"
-        )
+        logger.warning(f"{data.provid}: MHAOV best={best_mhaov:.3f}hr window-contaminated "
+                       f"(score={mhaov_cont:.2f})")
 
-    # ── 2. MBLS Nterms=2 — primary period detector ────────────────────────────
-    # MBLS is the primary detector. It uses all photometric bands jointly with
-    # a shared period model, giving it strictly more information than MHAOV
-    # (which collapses multi-band data to a single detrended series).
-    #
-    # 2-minima rule: always applied unconditionally. Previously gated on
-    # MHAOV agreement — that was a circular dependency that prevented MBLS
-    # from correcting itself when MHAOV was wrong. The 2-minima rule is a
-    # physical test on the MBLS lightcurve shape and requires no input from
-    # MHAOV. (Empirical finding: removing the gate recovered 5+ objects.)
+    # ── 2. MBLS ───────────────────────────────────────────────────────────────
     logger.debug(f"{data.provid}: running MBLS Nterms=2...")
     try:
         mbls_pow      = mbls_periodogram(
             data.t_hrs, data.y_multiband, data.dy, data.bands,
-            test_periods, nterms=cfg_p.mbls_nterms_t2
+            test_periods, nterms=cfg_p.mbls_nterms_t2,
         )
         best_mbls_raw = test_periods[np.argmax(mbls_pow)]
-
-        # ── LRT gate (Change 13) ──────────────────────────────────────────────
-        # Two statistically independent methods (MBLS multiband + MHAOV
-        # single-band) agreeing on best_mbls_raw is stronger evidence than
-        # the LRT sub-fundamental test alone.  When MHAOV confirms the raw
-        # period, the LRT is not needed and has been shown to over-double
-        # 38% of the time (16/26 doublings wrong in Change 12 run).
-        #
-        # Scientific basis (Schwarzenberg-Czerny 1996; VanderPlas & Ivezic 2015):
-        # MBLS and MHAOV are built on different basis functions (Fourier
-        # multi-band joint fit vs. analysis of variance on single detrended
-        # series).  When both peak at the same period, the agreement is
-        # statistically independent — the probability of two unrelated methods
-        # both landing on a spurious alias is negligible for SNR>3 data.
-        #
-        # Rule: run LRT only when MHAOV does NOT confirm best_mbls_raw,
-        # i.e., when we have a genuine ambiguity that needs resolving.
-        _tol = cfg_t.agreement_tol          # default 0.10 (10%)
-        _mhaov_confirms_raw = any(
-            abs(best_mhaov - best_mbls_raw * mult) / (best_mbls_raw * mult + 1e-12) <= _tol
-            for mult in [1.0, 0.5, 2.0]
-        )
-
-        if _mhaov_confirms_raw:
-            # MHAOV agrees with MBLS raw → trust both, skip LRT
-            best_mbls  = best_mbls_raw
-            was_doubled = False
-            n_minima    = np.nan
-            lrt_pval    = np.nan
-            logger.debug(
-                f"{data.provid}: LRT skipped — MHAOV={best_mhaov:.3f}hr "
-                f"confirms MBLS raw={best_mbls_raw:.3f}hr (two independent methods agree)"
-            )
-        else:
-            # MHAOV disagrees → run LRT as tiebreaker
-            # 2-minima likelihood ratio test (Change 9, corrected Change 10).
-            # alpha uses Bonferroni correction for n_objects tests (Change 10).
-            # Spin-barrier prior removed (Change 12) — LRT decides unconditionally.
-            best_mbls, was_doubled, n_minima, lrt_pval = apply_two_minima_lrt(
-                data.t_hrs, data.y_multiband, data.dy, data.bands,
-                period=best_mbls_raw, nterms=cfg_p.mbls_nterms_t2,
-                n_objects=cfg_t.lrt_n_objects,
-                mhaov_period=best_mhaov,
-                spin_barrier_hr=SPIN_BARRIER_HR,
-            )
-            if was_doubled:
-                logger.debug(
-                    f"{data.provid}: LRT 2-minima: {best_mbls_raw:.3f}hr "
-                    f"→ doubled to {best_mbls:.3f}hr (F={n_minima:.2f} p={lrt_pval:.2e})"
-                )
-            else:
-                logger.debug(
-                    f"{data.provid}: LRT 2-minima: kept at {best_mbls_raw:.3f}hr "
-                    f"(F={n_minima:.2f} p={lrt_pval:.2e}, no doubling)"
-                )
     except Exception as e:
-        logger.warning(f"{data.provid}: MBLS Tier2 failed ({e}) — falling back to MHAOV period")
+        logger.warning(f"{data.provid}: MBLS failed ({e}) — falling back to MHAOV")
         mbls_pow      = mhaov_pow.copy()
         best_mbls_raw = best_mhaov
-        best_mbls     = best_mhaov
-        was_doubled   = False
-        n_minima      = -1
-        lrt_pval      = np.nan
 
-    # Score MBLS best period
-    mbls_cont = contamination_score(float(best_mbls), test_periods, window_pow,
-                                  baseline_hr=data.baseline_hr)
+    mbls_cont = contamination_score(best_mbls_raw, test_periods, window_pow,
+                                    baseline_hr=data.baseline_hr)
     if mbls_cont > CONTAMINATION_THRESHOLD:
-        logger.warning(
-            f"{data.provid}: MBLS best={best_mbls:.3f}hr is window-contaminated "
-            f"(score={mbls_cont:.2f})"
+        logger.warning(f"{data.provid}: MBLS best={best_mbls_raw:.3f}hr window-contaminated "
+                       f"(score={mbls_cont:.2f})")
+
+    # ── 3. Period-doubling decision ───────────────────────────────────────────
+    # If MHAOV independently finds ~2×P_raw, the true period is the doubled
+    # value. This is direct observational evidence from a second independent
+    # method — no sub-fundamental test required.
+    tol         = cfg_t.agreement_tol
+    was_doubled = (
+        abs(best_mhaov - 2.0 * best_mbls_raw) / (2.0 * best_mbls_raw + 1e-12) <= tol
+    )
+    best_mbls = 2.0 * best_mbls_raw if was_doubled else best_mbls_raw
+    if was_doubled:
+        logger.debug(f"{data.provid}: MHAOV={best_mhaov:.3f}hr ≈ 2×MBLS raw={best_mbls_raw:.3f}hr "
+                     f"→ doubling to {best_mbls:.3f}hr")
+
+    # ── 4. Top-5 MBLS peaks ───────────────────────────────────────────────────
+    try:
+        _top_ps, _top_pows = window_informed_peaks(
+            test_periods, mbls_pow, window_pow,
+            n_peaks=5, baseline_hr=data.baseline_hr,
         )
+        _mbls_top_periods = np.array(_top_ps)
+        _mbls_top_powers  = np.array(_top_pows)
+    except Exception:
+        _mbls_top_periods = np.array([best_mbls_raw])
+        _mbls_top_powers  = np.array([float(np.max(mbls_pow))])
 
-    # ── Top-5 MBLS peaks (Change 10) ─────────────────────────────────────────
-    # Store the top-5 window-penalised MBLS peaks and their raw powers.
-    # This allows post-hoc inspection of whether the truth period was present
-    # as a secondary MBLS peak in cases where the argmax was wrong.
-    # In particular, for the T1-alias-lock failures where MHAOV found the
-    # truth but MBLS did not, we can now check what rank the truth was at.
-    from window import window_informed_peaks as _wip
-    _mbls_top_periods, _mbls_top_powers, _ = _wip(
-        test_periods, mbls_pow, window_pow,
-        n_peaks=5,
-        min_period_hr=float(test_periods[0]),
-        max_period_hr=float(test_periods[-1]),
-    )
-    logger.debug(
-        f"{data.provid}: MBLS top-5 peaks: "
-        + ", ".join(f"{p:.3f}hr(pw={pw:.4f})"
-                    for p, pw in zip(_mbls_top_periods, _mbls_top_powers))
-    )
+    # ── 5. CE (annotation only) ───────────────────────────────────────────────
+    best_ce   = np.nan
+    ce_scores = empty
+    ce_cont   = np.nan
+    if data.period_min_hr >= 1.0:
+        try:
+            ce_scores = ce_periodogram(data.t_hrs, data.y_dt, test_periods)
+            best_ce   = test_periods[np.argmin(ce_scores)]
+            ce_cont   = contamination_score(best_ce, test_periods, window_pow,
+                                            baseline_hr=data.baseline_hr)
+            logger.debug(f"{data.provid}: CE best={best_ce:.3f}hr (annotation only)")
+        except Exception as e:
+            logger.debug(f"{data.provid}: CE skipped ({e})")
 
-    # ── MBLS false alarm probability — permutation test ───────────────────────
-    # Uses a coarse 500-point grid for permutations: we only need the null
-    # max-power distribution, not a resolved periodogram. The real MBLS peak
-    # (from the fine grid above) is compared against this null distribution.
-    # Coarse grid makes each permutation ~16× faster than the fine grid.
-    observed_mbls_max = float(mbls_pow.max())
+    # ── 6. MBLS significance ──────────────────────────────────────────────────
     mbls_fap = compute_mbls_fap(
         data.t_hrs, data.y_multiband, data.dy, data.bands,
-        test_periods=test_periods,
-        observed_max_power=observed_mbls_max,
+        test_periods, observed_max_power=float(np.max(mbls_pow)),
+        nterms=cfg_p.mbls_nterms_t2,
         n_perm=cfg_t.mbls_fap_n_perm,
-        nterms=cfg_p.mbls_nterms_t2,
     )
-    mhaov_sig = p_value  < cfg_t.mhaov_pval_thresh
-    mbls_sig  = mbls_fap < cfg_t.mbls_fap_thresh
-    both_sig  = mhaov_sig and mbls_sig
-    either_sig = mhaov_sig or mbls_sig
+    mbls_sig   = mbls_fap < cfg_t.mbls_fap_thresh
+    mhaov_sig  = p_value  < cfg_t.mhaov_pval_thresh
+    either_sig = mbls_sig or mhaov_sig
+    both_sig   = mbls_sig and mhaov_sig
+
+    # ── 7. Band support ───────────────────────────────────────────────────────
+    try:
+        band_support, n_bands_supporting, band_support_frac = compute_mbls_band_support(
+            data.t_hrs, data.y_multiband, data.dy, data.bands,
+            period=best_mbls, nterms=cfg_p.mbls_nterms_t2,
+        )
+    except Exception:
+        band_support, n_bands_supporting, band_support_frac = {}, 0, 0.0
+
+    # ── 8. Consensus and MHAOV confirmation ───────────────────────────────────
+    consensus      = best_mbls
+    consensus_cont = contamination_score(consensus, test_periods, window_pow,
+                                         baseline_hr=data.baseline_hr)
+    spread_pct     = abs(best_mhaov - consensus) / (consensus + 1e-12)
+
+    def _confirms(mhaov_p, ref_p):
+        return any(
+            abs(mhaov_p - ref_p * m) / (ref_p * m + 1e-12) <= tol
+            for m in [1.0, 0.5, 2.0]
+        )
+    mhaov_confirms = _confirms(best_mhaov, consensus)
 
     logger.debug(
-        f"{data.provid}: MBLS FAP={mbls_fap:.4f} "
-        f"({'sig' if mbls_sig else 'not sig'})  "
-        f"MHAOV p={p_value:.2e} "
-        f"({'sig' if mhaov_sig else 'not sig'})  "
-        f"both={both_sig}"
+        f"{data.provid}: consensus={consensus:.3f}hr  "
+        f"MHAOV={'confirms' if mhaov_confirms else 'disagrees'}  "
+        f"doubled={was_doubled}  mbls_fap={mbls_fap:.4f}  p={p_value:.2e}"
     )
 
-    # ── 3. Conditional Entropy — annotation only ─────────────────────────────
-    # CE requires period_floor >= 1hr to sample phase space adequately.
-    # All Rubin data has an Eyer & Bartholdi floor of ~1.4min, so CE is skipped
-    # for essentially every object.
-    #
-    # CRITICAL FIX: previously best_ce = best_mhaov when skipped. This gave
-    # MHAOV two votes in the three-way consensus (MHAOV + CE=MHAOV vs MBLS).
-    # CE is now annotation-only: best_ce = NaN when skipped and is never used
-    # in the period decision. When CE does run (classical/sparse datasets with
-    # large minimum gaps), its result is stored for catalog annotation only.
-    CE_MIN_HR = 1.0
-    ce_skip   = (data.period_min_hr < CE_MIN_HR)
-    if ce_skip:
-        logger.debug(
-            f"{data.provid}: CE skipped — annotation only "
-            f"(period floor={data.period_min_hr*60:.1f}min < 60min)"
-        )
-        ce_periods = test_periods
-        ce_scores  = np.ones(len(test_periods))
-        best_ce    = np.nan   # NaN = not run; never participates in decision
-    else:
-        logger.debug(f"{data.provid}: running Conditional Entropy (annotation only)...")
-        ce_periods = np.linspace(
-            max(data.period_min_hr, CE_MIN_HR),
-            min(cfg_p.period_max_hr, data.baseline_hr),
-            cfg_p.n_grid_ce,
-        )
-        ce_scores = ce_periodogram(
-            data.t_hrs, data.y_dt, ce_periods,
-            n_phase=cfg_p.ce_n_phase, n_mag=cfg_p.ce_n_mag
-        )
-        best_ce = ce_periods[np.argmin(ce_scores)]
-        logger.debug(
-            f"{data.provid}: CE best={best_ce:.3f}hr (annotation, not used in decision)"
-        )
-
-    # ── CE contamination score (annotation) ──────────────────────────────────
-    ce_cont = contamination_score(
-        float(best_ce) if not np.isnan(best_ce) else float(best_mbls),
-        test_periods, window_pow, baseline_hr=data.baseline_hr
-    )
-
-    # ── MBLS per-band support ─────────────────────────────────────────────────
-    band_support, n_bands_supporting, band_support_frac = compute_mbls_band_support(
-        data.t_hrs, data.y_multiband, data.dy, data.bands,
-        period=float(best_mbls),
-        nterms=cfg_p.mbls_nterms_t2,
-    )
-    logger.debug(
-        f"{data.provid}: MBLS band support at {best_mbls:.3f}hr: "
-        f"{band_support} → {n_bands_supporting}/{len(band_support)} bands "
-        f"(frac={band_support_frac:.2f})"
-    )
-
-    # ── MHAOV confirmation check ──────────────────────────────────────────────
-    # MHAOV "confirms" MBLS if its best period is within agreement_tol of
-    # best_mbls or a harmonic (P/2 or 2P). MHAOV is not competing with MBLS
-    # for the consensus period — it is asking: "does the single-band significance
-    # test agree that THIS period (best_mbls) is real?"
-    #
-    # P/2 check: common for double-hump lightcurves where MHAOV (NH=2 harmonics)
-    # prefers the half-period more strongly in the single-band collapsed series.
-    # 2P check: common when MBLS 2-minima rule doubled and MHAOV stayed at P/2.
-    def _mhaov_confirms(mhaov_p, mbls_p, tol):
-        for mult in [1.0, 0.5, 2.0]:
-            if abs(mhaov_p - mbls_p * mult) / (mbls_p * mult + 1e-12) <= tol:
-                return True
-        return False
-
-    mhaov_confirms = _mhaov_confirms(best_mhaov, best_mbls, cfg_t.agreement_tol)
-
-    # Period spread: |MHAOV - MBLS| / MBLS (meaningful only when MHAOV confirms)
-    spread_pct = float(abs(best_mhaov - best_mbls) / (best_mbls + 1e-12))
-
-    # Consensus period: always best_mbls — MBLS is the primary detector.
-    consensus = float(best_mbls)
-    consensus_cont = contamination_score(
-        consensus, test_periods, window_pow, baseline_hr=data.baseline_hr
-    )
-
-    logger.debug(
-        f"{data.provid} Tier2: MHAOV={best_mhaov:.3f}hr (cont={mhaov_cont:.2f}, "
-        f"{'confirms' if mhaov_confirms else 'disagrees'})  "
-        f"MBLS={best_mbls:.3f}hr (cont={mbls_cont:.2f})  "
-        f"CE={'skipped' if np.isnan(best_ce) else f'{best_ce:.3f}hr'} (annotation)  "
-        f"consensus={consensus:.3f}hr (cont={consensus_cont:.2f})  "
-        f"mhaov_confirms={mhaov_confirms}  F={F_best:.1f}  p={p_value:.2e}  "
-        f"mbls_fap={mbls_fap:.4f}  both_sig={both_sig}"
-    )
-
-    # ── Decision — MBLS primary, MHAOV confirmation ───────────────────────────
-    def _make_result(passes, to_tier3, agreement_val, reject_reason=None):
+    # ── 9. Decision ───────────────────────────────────────────────────────────
+    def _result(passes, to_tier3, agreement_val, reject_reason=None):
         return Tier2Result(
-            provid=data.provid, passes=passes, to_tier3=to_tier3,
+            provid=data.provid,
+            passes=passes,
+            to_tier3=to_tier3,
             best_period_mhaov=best_mhaov,
-            best_period_mbls=best_mbls,
             best_period_mbls_raw=best_mbls_raw,
+            best_period_mbls=best_mbls,
             best_period_ce=best_ce,
             consensus_period=consensus,
-            F_stat=F_best, p_value=p_value,
-            amplitude=data.amplitude, snr=data.snr,
+            was_doubled=was_doubled,
+            F_stat=F_best,
+            p_value=p_value,
+            amplitude=data.amplitude,
+            snr=data.snr,
             agreement=agreement_val,
             period_spread_pct=spread_pct,
             reject_reason=reject_reason,
@@ -516,170 +344,78 @@ def run_tier2(
             mhaov_confirms=mhaov_confirms,
             mbls_top_periods=_mbls_top_periods,
             mbls_top_powers=_mbls_top_powers,
-            lrt_f_stat=float(n_minima),
-            lrt_p_value=float(lrt_pval),
-            lrt_doubled=bool(was_doubled),
         )
 
-    # ── Path 1: Neither gate significant → reject ──────────────────────────────
-    # No evidence for any period. Tier 3 on noise is uninformative.
+    # Path 1: no signal
     if not mbls_sig and not mhaov_sig:
-        return _make_result(
+        return _result(
             passes=False, to_tier3=False, agreement_val=False,
             reject_reason=(
                 f"neither gate significant "
                 f"(MBLS FAP={mbls_fap:.4f}, MHAOV p={p_value:.2e})"
-            )
+            ),
         )
 
-    # ── Path 2: MHAOV confirms MBLS, either gate significant → publish ─────────
-    # MHAOV agrees with MBLS (or its harmonic). Both methods point to the same
-    # underlying period. Confidence depends on how many gates fired.
-    #   both_sig → R=3 eligible (full confidence)
-    #   either_sig → R≤2 (moderate confidence)
+    # Path 2: MHAOV confirms consensus → publish
     if mhaov_confirms and either_sig:
-        logger.debug(f"{data.provid}: MHAOV confirms MBLS={best_mbls:.3f}hr → mbls_confirmed")
-        return _make_result(passes=True, to_tier3=False, agreement_val="mbls_confirmed")
+        logger.debug(f"{data.provid}: MHAOV confirms → mbls_confirmed")
+        return _result(passes=True, to_tier3=False, agreement_val="mbls_confirmed")
 
-    # ── Path 3: MBLS significant, MHAOV does not confirm ──────────────────────
-    # MBLS FAP directly tests whether multi-band power exceeds the noise null
-    # distribution. If FAP < 0.001, the multi-band signal is real. MHAOV
-    # non-confirmation means the single-band collapsed series finds a different
-    # peak — not that the MBLS period is wrong.
-    #
-    # Previous version had a sub-branch: if MHAOV is ALSO significant at a
-    # different period → Tier 3. This caused 27/76 objects to hit Tier 3 and
-    # fail (CLEAN could not resolve), losing 35% of publications. The sub-branch
-    # was wrong: both methods being significant at different periods is the
-    # expected behaviour when MHAOV's single-band series finds a harmonic or
-    # alias while MBLS finds the true period. It is NOT genuine ambiguity.
-    #
-    # Correct logic: if MBLS is significant, publish the MBLS period.
-    # MHAOV disagreement is logged as an annotation. Tier 3 is not used here.
-    # The R-code will be capped at 2 (no independent confirmation from MHAOV).
-    if mbls_sig and not mhaov_confirms:
-        mhaov_note = (f"MHAOV={best_mhaov:.3f}hr "
-                      f"({'sig' if mhaov_sig else 'not sig'}, disagrees)")
-        logger.debug(
-            f"{data.provid}: MBLS={best_mbls:.3f}hr sig (FAP={mbls_fap:.4f}), "
-            f"MHAOV does not confirm ({mhaov_note}) → mbls_sig_only, publish R≤2"
-        )
-        return _make_result(passes=True, to_tier3=False, agreement_val="mbls_sig_only")
+    # Path 3: both significant but genuinely different periods → Tier 3
+    if both_sig and not mhaov_confirms:
+        logger.debug(f"{data.provid}: both significant, MHAOV disagrees → Tier 3")
+        return _result(passes=False, to_tier3=True, agreement_val=False)
 
-    # ── Path 4: Only MHAOV significant, MBLS not significant ──────────────────
-    # This is the MHAOV-only case (4/76 objects). MHAOV found something MBLS
-    # missed. Send to Tier 3 for CLEAN confirmation — we have one significant
-    # signal but without multi-band confirmation it needs independent validation.
-    if mhaov_sig and not mbls_sig:
-        logger.debug(
-            f"{data.provid}: MHAOV={best_mhaov:.3f}hr sig, MBLS not sig → Tier 3"
-        )
-        return _make_result(passes=False, to_tier3=True, agreement_val=False)
+    # Path 4: MBLS significant alone → publish with lower confidence
+    if mbls_sig:
+        logger.debug(f"{data.provid}: MBLS significant, MHAOV disagrees → mbls_sig_only")
+        return _result(passes=True, to_tier3=False, agreement_val="mbls_sig_only")
+
+    # Path 5: MHAOV significant alone → Tier 3 for disambiguation
+    return _result(passes=False, to_tier3=True, agreement_val=False)
 
 
-# ── MBLS false alarm probability ─────────────────────────────────────────────
+# ── MBLS permutation FAP ──────────────────────────────────────────────────────
 
 def compute_mbls_fap(
-    t:                   np.ndarray,
-    y:                   np.ndarray,
-    dy:                  np.ndarray,
-    bands:               np.ndarray,
-    test_periods:        np.ndarray,
-    observed_max_power:  float,
-    n_perm:              int   = 200,
-    nterms:              int   = 2,
-    n_coarse:            int   = 500,
-    seed:                int   = 42,
+    t:                  np.ndarray,
+    y:                  np.ndarray,
+    dy:                 np.ndarray,
+    bands:              np.ndarray,
+    test_periods:       np.ndarray,
+    observed_max_power: float,
+    nterms:             int   = 2,
+    n_perm:             int   = 200,
+    n_coarse:           int   = 500,
+    seed:               int   = 42,
 ) -> float:
     """
-    Estimate MBLS false alarm probability via permutation test.
+    MBLS false alarm probability via label permutation.
 
-    Shuffles the time labels n_perm times. For each shuffle, computes the
-    maximum MBLS power on a coarse grid. The FAP is the fraction of
-    permutations where max power >= observed_max_power.
-
-    Why time-label shuffling?
-    -------------------------
-    Shuffling t while keeping y, dy, bands fixed destroys all temporal
-    periodicity but preserves the noise properties, magnitude distribution,
-    and band structure. This gives the correct null distribution for the
-    hypothesis "there is no periodic signal in this data."
-
-    Why a coarse grid for permutations?
-    ------------------------------------
-    The null distribution only needs the max-power statistic — we don't
-    need to resolve individual peaks. A 500-point grid runs ~16× faster
-    than the full fine grid.
-
-    KNOWN LIMITATION — coarse/fine grid asymmetry
-    ----------------------------------------------
-    The observed max power is taken from the fine grid (up to 50,000 pts).
-    The null distribution is built from permutations on the coarse grid
-    (500 pts). This creates an asymmetry: a fine grid has more trial
-    frequencies and therefore more chances for a noise peak to reach a
-    given threshold, even under the null. Comparing fine-grid observed
-    power against coarse-grid null power causes the FAP to be
-    systematically underestimated — the test is anti-conservative
-    (over-publishes in marginal cases).
-
-    The correct fix (not yet implemented, see roadmap below) is either:
-      (a) Run all permutations on the full fine grid — exact but slow.
-      (b) Horne & Baliunas (1986) correction: scale observed fine-grid
-          power to its coarse-grid equivalent before comparing, using the
-          ratio of independent frequencies M_fine / M_coarse. The same
-          correction is already applied in gls_fap() for MHAOV.
-
-    In practice for Rubin commissioning data the vast majority of FAP
-    values are 0.0000 (0/200 permutations exceed observed power). The
-    signals are clear enough that the asymmetry is not causing false
-    positives. The concern would matter most for marginal detections near
-    the FAP threshold. This should be revisited in the Change 3 simulation
-    study when synthetic lightcurves at varying SNR are evaluated.
-
-    Roadmap: implement option (b) — compute observed power on coarse grid
-    at the already-identified best_mbls period (single evaluation, not a
-    full periodogram), then compare against the coarse-grid null.
-
-    Typical cost: ~0.5–2s per asteroid (200 perms × coarse grid).
-
-    Parameters
-    ----------
-    test_periods         : fine-grid periods (used to set coarse grid range)
-    observed_max_power   : max MBLS power on the fine grid (pre-computed)
-    n_perm               : number of permutations (200 → FAP resolution 0.005)
-    nterms               : MBLS Fourier terms (match what produced observed power)
-    n_coarse             : grid points for permutation periodograms
-    seed                 : random seed for reproducibility
+    Shuffles observation timestamps to build the null distribution of
+    maximum power. FAP = fraction of permutations where max power
+    exceeds the observed value.
 
     Returns
     -------
     fap : float in [0, 1]
-        Fraction of permutations with max power >= observed.
-        Low FAP (< 0.001) → signal is significant.
     """
-    rng = np.random.default_rng(seed)
-
-    # Coarse grid spanning the same range as the fine grid
-    p_lo = float(test_periods[0])
-    p_hi = float(test_periods[-1])
-    coarse_periods = np.linspace(p_lo, p_hi, n_coarse)
+    rng    = np.random.default_rng(seed)
+    p_lo   = float(test_periods[0])
+    p_hi   = float(test_periods[-1])
+    coarse = np.linspace(p_lo, p_hi, n_coarse)
 
     n_exceed = 0
     for _ in range(n_perm):
         t_perm = rng.permutation(t)
         try:
-            pow_perm = mbls_periodogram(
-                t_perm, y, dy, bands, coarse_periods, nterms=nterms
-            )
+            pow_perm = mbls_periodogram(t_perm, y, dy, bands, coarse, nterms=nterms)
             if float(pow_perm.max()) >= observed_max_power:
                 n_exceed += 1
         except Exception:
-            # If gatspy fails on a permutation (degenerate case), treat as
-            # low power — do not count as exceeding observed.
             pass
 
     return float(n_exceed) / float(n_perm)
-
 
 
 # ── MBLS per-band support ─────────────────────────────────────────────────────
@@ -693,110 +429,44 @@ def compute_mbls_band_support(
     nterms:  int = 2,
 ) -> tuple:
     """
-    Compute per-band chi-sq improvement of MBLS fit at a given period.
+    Per-band chi-sq improvement of MBLS fit at a given period.
 
-    For each photometric band, measures how much better a Fourier model at
-    `period` fits the data compared to a flat (constant) model. A band
-    "supports" the period if its improvement exceeds BAND_SUPPORT_THRESH.
-
-    This is the key quantity for Change 5: in the two_of_three reliability
-    path (MHAOV+MBLS agree, CE disagrees), we check whether multiple bands
-    independently agree on the period. If so, the CE disagreement is more
-    likely to be a CE limitation (histogram under-sampling) than evidence
-    against the period.
-
-    Why chi-sq improvement per band?
-    ---------------------------------
-    MBLS maximises joint chi-sq across all bands simultaneously. The global
-    result could be driven by one band with many observations while another
-    band is essentially flat. Per-band chi-sq improvement isolates each
-    band's individual contribution to the detection.
-
-    Parameters
-    ----------
-    period  : period to evaluate (hours) — typically the MBLS consensus period
-    nterms  : Fourier terms (match what was used for the MBLS periodogram)
+    Measures how much better a Fourier model at `period` fits each
+    band versus a flat (constant) model.
 
     Returns
     -------
-    band_support        : dict {band_name: chi_sq_improvement_fraction}
-                          Values in [0, 1]: 0 = flat fits as well as periodic,
-                          1 = periodic model explains all variance.
-    n_bands_supporting  : int — number of bands with score > BAND_SUPPORT_THRESH
-    band_support_frac   : float — n_bands_supporting / n_bands_total
+    (band_support_dict, n_bands_supporting, support_frac)
     """
-    from gatspy.periodic import LombScargleMultiband
+    model = LombScargleMultiband(Nterms_base=nterms, Nterms_band=0)
+    model.fit(t, y, dy, bands)
 
-    unique_bands = np.unique(bands)
-    band_support = {}
+    unique_bands  = np.unique(bands)
+    band_support  = {}
 
-    for band in unique_bands:
-        mask = bands == band
-        t_b  = t[mask]
-        y_b  = y[mask]
-        dy_b = dy[mask]
-
-        if len(t_b) < 4:
-            band_support[str(band)] = 0.0
+    for b in unique_bands:
+        mask = bands == b
+        t_b, y_b, dy_b = t[mask], y[mask], dy[mask]
+        if len(t_b) < 2 * nterms + 2:
+            band_support[b] = 0.0
             continue
-
-        w     = 1.0 / dy_b**2
-        y_wm  = float(np.average(y_b, weights=w))
-        ss_tot = float(np.sum(w * (y_b - y_wm)**2))
-
-        if ss_tot < 1e-12:
-            band_support[str(band)] = 0.0
+        w      = 1.0 / dy_b**2
+        y_mean = np.average(y_b, weights=w)
+        ss_tot = float(np.sum(w * (y_b - y_mean)**2))
+        if ss_tot <= 0:
+            band_support[b] = 0.0
             continue
+        y_pred = model.predict(t_b, filts=np.full(len(t_b), b), period=period)
+        ss_res = float(np.sum(w * (y_b - y_pred)**2))
+        band_support[b] = max(0.0, 1.0 - ss_res / ss_tot)
 
-        # Fit Fourier model at this period for this band alone
-        ph = 2.0 * np.pi * t_b / period
-        cols = [np.ones(len(t_b))]
-        for k in range(1, nterms + 1):
-            cols += [np.cos(k * ph), np.sin(k * ph)]
-        A = np.column_stack(cols)
+    n_supporting = sum(1 for v in band_support.values() if v > BAND_SUPPORT_THRESH)
+    support_frac = n_supporting / len(unique_bands) if unique_bands.size > 0 else 0.0
 
-        try:
-            Aw     = A * w[:, None]
-            coeffs = np.linalg.lstsq(Aw.T @ A, Aw.T @ y_b, rcond=None)[0]
-            y_fit  = A @ coeffs
-            ss_res = float(np.sum(w * (y_b - y_fit)**2))
-            improvement = float(np.clip(1.0 - ss_res / ss_tot, 0.0, 1.0))
-        except (np.linalg.LinAlgError, ValueError):
-            improvement = 0.0
-
-        band_support[str(band)] = improvement
-
-    n_total     = len(unique_bands)
-    n_supporting = sum(1 for v in band_support.values() if v >= BAND_SUPPORT_THRESH)
-    frac         = float(n_supporting) / float(n_total) if n_total > 0 else 0.0
-
-    return band_support, n_supporting, frac
-
-# ── Contamination-weighted consensus ─────────────────────────────────────────
-
-def _contamination_weighted_consensus(
-    periods:        list,
-    contaminations: list,
-    fallback:       float,
-) -> float:
-    """
-    Choose a consensus period that prefers less window-contaminated estimates.
-
-    Strategy:
-    - If one or more estimates has contamination < CONTAMINATION_THRESHOLD,
-      take the median of only those clean estimates.
-    - If all estimates are contaminated, fall back to plain median.
-      (All three methods hitting window peaks simultaneously is itself
-      informative — the reliability code will flag it.)
-    """
-    clean_mask = [c < CONTAMINATION_THRESHOLD for c in contaminations]
-    if any(clean_mask):
-        clean_periods = [p for p, m in zip(periods, clean_mask) if m]
-        return float(np.median(clean_periods))
-    return fallback
+    return band_support, n_supporting, support_frac
 
 
-# ── MHAOV implementation ──────────────────────────────────────────────────────
+# ── MHAOV ─────────────────────────────────────────────────────────────────────
 
 def mhaov_single(
     t:      np.ndarray,
@@ -805,34 +475,32 @@ def mhaov_single(
     period: float,
     nh:     int = 2,
 ) -> float:
-    """
-    Multi-Harmonic AOV F-statistic at a single trial period.
-    Schwarzenberg-Czerny (1996).
-    """
-    w  = 1.0 / dy**2
-    N  = len(t)
-    ph = 2.0 * np.pi * t / period
+    """MHAOV F-statistic at a single trial period."""
+    w      = 1.0 / dy**2
+    phase  = (t / period) % 1.0
+    n_bins = 2 * nh
+    bins   = np.floor(phase * n_bins).astype(int) % n_bins
 
-    cols = [np.ones(N)]
-    for k in range(1, nh + 1):
-        cols.append(np.cos(k * ph))
-        cols.append(np.sin(k * ph))
-    A = np.column_stack(cols)
+    w_tot   = w.sum()
+    y_wmean = np.dot(w, y) / w_tot
+    ss_tot  = float(np.sum(w * (y - y_wmean)**2))
 
-    try:
-        Aw       = A * w[:, None]
-        coeffs   = np.linalg.solve(Aw.T @ A, Aw.T @ y)
-        y_fit    = A @ coeffs
-        y_wmean  = np.average(y, weights=w)
-        SS_model = np.sum(w * (y_fit  - y_wmean)**2)
-        SS_resid = np.sum(w * (y      - y_fit  )**2)
-        df_model = 2 * nh
-        df_resid = N - 2 * nh - 1
-        if df_resid <= 0 or SS_resid == 0:
-            return 0.0
-        return float((SS_model / df_model) / (SS_resid / df_resid))
-    except np.linalg.LinAlgError:
-        return 0.0
+    ss_model = 0.0
+    for b in range(n_bins):
+        mask = bins == b
+        if mask.sum() < 1:
+            continue
+        w_b  = w[mask].sum()
+        ym_b = np.dot(w[mask], y[mask]) / w_b
+        ss_model += w_b * (ym_b - y_wmean)**2
+
+    df_model = n_bins - 1
+    df_resid = max(len(t) - n_bins, 1)
+    ss_resid = max(ss_tot - ss_model, 0.0)
+
+    if ss_resid <= 0:
+        return np.inf
+    return (ss_model / df_model) / (ss_resid / df_resid)
 
 
 def mhaov_periodogram(
@@ -842,462 +510,8 @@ def mhaov_periodogram(
     test_periods: np.ndarray,
     nh:           int = 2,
 ) -> np.ndarray:
-    """
-    MHAOV F-statistic over a grid of trial periods.
-    Vectorised, chunked implementation.
-    """
-    N        = len(t)
-    P        = len(test_periods)
-    w        = 1.0 / dy**2
-    y_wmean  = float(np.average(y, weights=w))
-    df_model = 2 * nh
-    df_resid = N - 2 * nh - 1
-
-    if df_resid <= 0:
-        return np.zeros(P)
-
-    F_out  = np.zeros(P)
-    chunk  = 500
-
-    for start in range(0, P, chunk):
-        end  = min(start + chunk, P)
-        tp   = test_periods[start:end]
-        C    = len(tp)
-
-        ph = 2.0 * np.pi * t[np.newaxis, :] / tp[:, np.newaxis]
-
-        cols = [np.ones((C, N))]
-        for k in range(1, nh + 1):
-            cols.append(np.cos(k * ph))
-            cols.append(np.sin(k * ph))
-        A = np.stack(cols, axis=2)
-
-        Aw = A * w[np.newaxis, :, np.newaxis]
-
-        AtwA = np.einsum("cnk,cnl->ckl", Aw, A)
-        Atwy = np.einsum("cnk,n->ck",    Aw, y)
-
-        try:
-            coeffs = np.linalg.solve(
-                AtwA, Atwy[:, :, np.newaxis]
-            )[:, :, 0]
-        except (np.linalg.LinAlgError, ValueError):
-            F_out[start:end] = np.array(
-                [mhaov_single(t, y, dy, p, nh) for p in tp]
-            )
-            continue
-
-        y_fit    = np.einsum("cnk,ck->cn", A, coeffs)
-        SS_model = np.sum(w[np.newaxis, :] * (y_fit - y_wmean)**2, axis=1)
-        SS_resid = np.sum(w[np.newaxis, :] * (y[np.newaxis, :] - y_fit)**2, axis=1)
-
-        with np.errstate(divide="ignore", invalid="ignore"):
-            F = np.where(
-                SS_resid > 0,
-                (SS_model / df_model) / (SS_resid / df_resid),
-                0.0,
-            )
-        F_out[start:end] = np.clip(F, 0.0, None)
-
-    return F_out
-
-
-# ── Conditional Entropy implementation ───────────────────────────────────────
-
-def ce_single(
-    t:       np.ndarray,
-    y:       np.ndarray,
-    period:  float,
-    n_phase: int = 10,
-    n_mag:   int = 5,
-) -> float:
-    """
-    Conditional Entropy H(magnitude | phase) at a single trial period.
-    Graham et al. (2013). Lower = better.
-    """
-    phase  = (t % period) / period
-    y_norm = (y - y.min()) / (y.max() - y.min() + 1e-12)
-
-    H2d, _, _ = np.histogram2d(phase, y_norm,
-                                bins=[n_phase, n_mag],
-                                range=[[0, 1], [0, 1]])
-    p_joint = H2d / (H2d.sum() + 1e-12)
-    p_phase = p_joint.sum(axis=1, keepdims=True)
-
-    with np.errstate(divide='ignore', invalid='ignore'):
-        ratio = np.where(p_phase > 0, p_joint / p_phase, 0.0)
-        ce    = -np.sum(p_joint * np.log(ratio + 1e-12))
-
-    return float(ce)
-
-
-def ce_periodogram(
-    t:            np.ndarray,
-    y:            np.ndarray,
-    test_periods: np.ndarray,
-    n_phase:      int = 10,
-    n_mag:        int = 5,
-    chunk:        int = 500,
-) -> np.ndarray:
-    """Conditional Entropy over a grid of trial periods. Lower = better."""
-    N = len(t)
-    P = len(test_periods)
-
-    y_min, y_max = float(y.min()), float(y.max())
-    if y_max == y_min:
-        return np.ones(P)
-    mag_bins = np.floor(
-        (y - y_min) / (y_max - y_min + 1e-10) * n_mag
-    ).astype(np.int32)
-    mag_bins = np.clip(mag_bins, 0, n_mag - 1)
-
-    ce_out = np.empty(P)
-
-    for start in range(0, P, chunk):
-        end  = min(start + chunk, P)
-        tp   = test_periods[start:end]
-        C    = len(tp)
-
-        phases     = (t[np.newaxis, :] % tp[:, np.newaxis]) / tp[:, np.newaxis]
-        phase_bins = np.floor(phases * n_phase).astype(np.int32)
-        phase_bins = np.clip(phase_bins, 0, n_phase - 1)
-
-        lin_idx = phase_bins * n_mag + mag_bins[np.newaxis, :]
-
-        for ci in range(C):
-            counts      = np.bincount(lin_idx[ci], minlength=n_phase * n_mag)
-            hist        = counts.reshape(n_phase, n_mag).astype(np.float64)
-            phase_totals = hist.sum(axis=1)
-            p_phase      = phase_totals / N
-
-            ce = 0.0
-            for pi in range(n_phase):
-                if phase_totals[pi] == 0:
-                    continue
-                p_m_given_ph = hist[pi] / phase_totals[pi]
-                with np.errstate(divide='ignore', invalid='ignore'):
-                    log_p = np.where(p_m_given_ph > 0,
-                                     np.log(p_m_given_ph), 0.0)
-                ce -= float(p_phase[pi] * np.dot(p_m_given_ph, log_p))
-            ce_out[start + ci] = ce
-
-    return ce_out
-
-
-# ── Agreement check ───────────────────────────────────────────────────────────
-
-def check_agreement(
-    p1:  float,
-    p2:  float,
-    p3:  float,
-    tol: float = 0.05,
-) -> Tuple[object, float]:
-    """
-    Check whether period estimates agree within fractional tolerance.
-    p1 = MHAOV, p2 = MBLS (may be doubled by 2-minima rule), p3 = CE
-    Returns (agrees, spread_pct).
-    """
-    tol_harmonic = tol * 2.0
-
-    periods    = np.array([p1, p2, p3])
-    median_p   = np.median(periods)
-    spread_pct = float(np.max(np.abs(periods - median_p) / (median_p + 1e-12)))
-
-    if spread_pct <= tol:
-        return True, spread_pct
-
-    d_mhaov_half = abs(p2 - 2*p1) / (2*p1 + 1e-12)
-    d_ce_half    = abs(p2 - 2*p3) / (2*p3 + 1e-12)
-    d_mbls_ce    = abs(p2 - p3)   / (p3   + 1e-12)
-    d_mbls_mhaov = abs(p2 - p1)   / (p1   + 1e-12)
-
-    if d_mhaov_half <= tol and d_ce_half <= tol_harmonic:
-        return True, float(max(d_mhaov_half, d_ce_half))
-
-    if d_mhaov_half <= tol and d_mbls_ce <= tol_harmonic:
-        return True, float(max(d_mhaov_half, d_mbls_ce))
-
-    if d_ce_half <= tol and d_mbls_mhaov <= tol_harmonic:
-        return True, float(max(d_ce_half, d_mbls_mhaov))
-
-    d_mhaov_double = abs(p1 - 2*p2) / (2*p2 + 1e-12)
-    d_ce_double    = abs(p3 - 2*p2) / (2*p2 + 1e-12)
-    d_ce_mhaov     = abs(p3 - p1)   / (p1   + 1e-12)
-
-    if d_mhaov_double <= tol and d_ce_mhaov <= tol_harmonic:
-        return True, float(max(d_mhaov_double, d_ce_mhaov))
-
-    if d_mhaov_double <= tol and abs(p3-p2)/(p2+1e-12) <= tol_harmonic:
-        return "two_of_three", float(d_mhaov_double)
-
-    d_mhaov_mbls = abs(p1 - p2) / (p2 + 1e-12)
-    if d_mhaov_mbls <= tol:
-        return "two_of_three", float(d_mhaov_mbls)
-
-    if d_ce_mhaov <= tol:
-        return "two_of_three", float(d_ce_mhaov)
-
-    return False, spread_pct
-
-
-def apply_two_minima_lrt(
-    t:              np.ndarray,
-    y_multiband:    np.ndarray,
-    dy:             np.ndarray,
-    bands:          np.ndarray,
-    period:         float,
-    nterms:         int   = 2,
-    alpha:          float = 0.05,
-    n_objects:      int   = 0,
-    mhaov_period:   float = np.nan,
-    spin_barrier_hr: float = 2.2,
-    dominant_band:  str   = None,
-) -> tuple:
-    """
-    Nested F-test for period doubling (Change 9, updated Change 10).
-
-    Change 10 additions:
-    --------------------
-    1. Bonferroni correction (n_objects > 0):
-       When running a batch of n_objects, the family-wise false-positive
-       rate at alpha=0.05 is 1-(0.95^n) ≈ 98% for n=76.  Bonferroni
-       corrects this: alpha_eff = alpha / n_objects = 0.05/76 = 6.6e-4.
-       This eliminates LRT false doubles on objects that genuinely have
-       P as their rotation period but show slight photometric asymmetry
-       at the 5% level due to noise.
-
-    2. Spin-barrier prior for symmetric double-humps (Pravec & Harris 2000):
-       A symmetric double-hump lightcurve (equal-depth minima) has zero
-       amplitude at the 1/(2P) sub-fundamental.  The LRT F-test will return
-       F≈0 regardless of alpha, so it can never double these objects.
-       Physical prior: objects above the rubble-pile spin barrier (2.2hr)
-       are rubble piles and are expected to show double-hump lightcurves.
-       If MHAOV independently finds a period within 10% of P/2 (meaning
-       a completely different statistical method also sees a period at half
-       the MBLS period), we take that as corroborating evidence of a
-       double-hump and double unconditionally.
-       This is not a heuristic — it is a physical prior with an independent
-       statistical confirmation requirement.
-
-    Parameters
-    ----------
-    period          : candidate MBLS period (raw, pre-doubling), hours
-    nterms          : Fourier terms in MBLS fit (must match T2)
-    alpha           : base F-test significance level (default 0.05)
-    n_objects       : total objects in batch run; if > 0, applies Bonferroni
-                      alpha_eff = alpha / n_objects
-    mhaov_period    : MHAOV best period (hours); used for spin-barrier prior
-    spin_barrier_hr : rubble-pile spin barrier (default 2.2hr, Pravec & Harris)
-
-    Returns
-    -------
-    (corrected_period, was_doubled, f_stat)
-    """
-    from scipy.stats import f as f_dist
-
-    # ── Bonferroni correction ─────────────────────────────────────────────────
-    alpha_eff = (alpha / n_objects) if n_objects > 0 else alpha
-
-    # NOTE (Change 12): the spin-barrier prior that previously bypassed the
-    # F-test has been removed.  The prior condition
-    #   (period > 2.2hr AND MHAOV ≈ P/2)  →  double unconditionally
-    # was mathematically circular: MHAOV with NH=2 spans {cos(2πt/P),
-    # cos(4πt/P)} and cos(4πt/P) ≡ cos(2πt/(P/2)).  MHAOV preferring P/2
-    # is a guaranteed consequence of the harmonic structure, not independent
-    # corroboration.  The prior also over-doubled ~5 correct detections
-    # (MG17, MH75, MQ58, MV46, MW70).  For symmetric double-humps (equal
-    # minima), the LRT correctly returns F≈0 and the period stays at P/2 of
-    # truth — the scientifically honest result when photometry cannot
-    # distinguish the two.  See Change 12 notes.
-
-    N = len(t)
-    w = 1.0 / dy**2
-
-    # ── Per-band mean subtraction ─────────────────────────────────────────────
-    unique_bands = np.unique(bands)
-    y_dt = y_multiband.copy()
-    for b in unique_bands:
-        mask = bands == b
-        y_dt[mask] -= np.average(y_multiband[mask], weights=w[mask])
-
-    def _wls_chi2(A: np.ndarray) -> float:
-        Aw = A * w[:, np.newaxis]
-        try:
-            coeffs = np.linalg.lstsq(Aw, w * y_dt, rcond=None)[0]
-        except np.linalg.LinAlgError:
-            return float(np.sum(w * y_dt**2))
-        resid = y_dt - A @ coeffs
-        return float(np.sum(w * resid**2))
-
-    # ── H0: nterms harmonics of P ─────────────────────────────────────────────
-    cols_H0 = []
-    for k in range(1, nterms + 1):
-        phase = 2.0 * np.pi * k * t / period
-        cols_H0.append(np.cos(phase))
-        cols_H0.append(np.sin(phase))
-    A_H0 = np.column_stack(cols_H0)
-
-    # ── H1: H0 + sub-fundamental {cos(πt/P), sin(πt/P)} ─────────────────────
-    sub_phase = np.pi * t / period
-    A_H1 = np.column_stack([
-        np.cos(sub_phase), np.sin(sub_phase),
-        A_H0,
-    ])
-
-    chi2_H0 = _wls_chi2(A_H0)
-    chi2_H1 = _wls_chi2(A_H1)
-
-    df_extra = 2
-    k_H1     = 2 * nterms + 2
-    df_resid = max(N - k_H1, 1)
-    improvement = max(chi2_H0 - chi2_H1, 0.0)
-
-    if chi2_H1 <= 0:
-        logger.debug(
-            f"LRT 2-minima: chi2_H1=0 at {period*2:.3f}hr — degenerate, doubling"
-        )
-        return period * 2.0, True, np.inf, 0.0
-
-    f_stat  = (improvement / df_extra) / (chi2_H1 / df_resid)
-    p_value = float(1.0 - f_dist.cdf(f_stat, df_extra, df_resid))
-
-    if p_value < alpha_eff:
-        logger.debug(
-            f"LRT 2-minima: F={f_stat:.2f} p={p_value:.2e} < alpha_eff={alpha_eff:.2e} "
-            f"→ doubling {period:.3f}hr → {period*2:.3f}hr"
-        )
-        return period * 2.0, True, f_stat, p_value
-    else:
-        logger.debug(
-            f"LRT 2-minima: F={f_stat:.2f} p={p_value:.2e} ≥ alpha_eff={alpha_eff:.2e} "
-            f"→ keeping {period:.3f}hr"
-        )
-        return period, False, f_stat, p_value
-
-
-def apply_two_minima_rule(
-    t:             np.ndarray,
-    y_multiband:   np.ndarray,
-    dy:            np.ndarray,
-    bands:         np.ndarray,
-    period:        float,
-    nterms:        int   = 2,
-    n_phase:       int   = 500,
-    prominence:    float = 0.01,
-    dominant_band: str   = None,
-) -> tuple:
-    """
-    DEPRECATED — retained for reference only.  Use apply_two_minima_lrt().
-
-    Original prominence-threshold rule: fit MBLS at P, count minima in the
-    fitted curve using scipy find_peaks with prominence=0.01.  If fewer than
-    2 minima, double.  The prominence threshold was arbitrary and caused
-    over-doubling (MF76, MJ13, MP67).  Replaced by apply_two_minima_lrt()
-    in Change 9.
-    """
-    from scipy.signal import find_peaks
-
-    if dominant_band is None:
-        unique, counts = np.unique(bands, return_counts=True)
-        dominant_band  = unique[np.argmax(counts)]
-
-    model = LombScargleMultiband(Nterms_base=nterms, Nterms_band=0)
-    model.fit(t, y_multiband, dy, bands)
-
-    phase_grid   = np.linspace(0, 1, n_phase)
-    t_grid       = phase_grid * period
-    fitted_curve = model.predict(
-        t_grid,
-        filts=np.full(n_phase, dominant_band),
-        period=period,
-    )
-
-    tiled      = np.concatenate([fitted_curve, fitted_curve])
-    all_mins, _= find_peaks(-tiled, prominence=prominence)
-    n_minima   = int(np.sum(all_mins < n_phase))
-
-    if n_minima < 2:
-        return period * 2.0, True, n_minima
-    else:
-        return period, False, n_minima
-
-
-def mhaov_single_sigma(
-    t:      np.ndarray,
-    y:      np.ndarray,
-    dy:     np.ndarray,
-    period: float,
-    nh:     int = 2,
-) -> tuple:
-    """MHAOV at a single period — returns (F_stat, SS_resid, df_resid)."""
-    w  = 1.0 / dy**2
-    N  = len(t)
-    ph = 2.0 * np.pi * t / period
-
-    cols = [np.ones(N)]
-    for k in range(1, nh + 1):
-        cols.append(np.cos(k * ph))
-        cols.append(np.sin(k * ph))
-    A = np.column_stack(cols)
-
-    try:
-        Aw       = A * w[:, None]
-        coeffs   = np.linalg.solve(Aw.T @ A, Aw.T @ y)
-        y_fit    = A @ coeffs
-        y_wmean  = np.average(y, weights=w)
-        SS_model = np.sum(w * (y_fit - y_wmean)**2)
-        SS_resid = np.sum(w * (y     - y_fit  )**2)
-        df_model = 2 * nh
-        df_resid = N - 2 * nh - 1
-        if df_resid <= 0 or SS_resid == 0:
-            return 0.0, np.inf, 1
-        F_stat = (SS_model / df_model) / (SS_resid / df_resid)
-        return float(F_stat), float(SS_resid), int(df_resid)
-    except np.linalg.LinAlgError:
-        return 0.0, np.inf, 1
-
-
-def mhaov_adaptive_period(
-    t:           np.ndarray,
-    y:           np.ndarray,
-    dy:          np.ndarray,
-    period:      float,
-    nh_min:      int   = 2,
-    nh_max:      int   = 4,
-    f_pval_thresh: float = 0.10,
-) -> tuple:
-    """MHAOV at a single period with adaptive harmonic order selection."""
-    from scipy.stats import f as f_dist
-
-    F_best, SS_best, df_best = mhaov_single_sigma(t, y, dy, period, nh=nh_min)
-    selected_nh  = nh_min
-    was_upgraded = False
-
-    for nh in range(nh_min + 1, nh_max + 1):
-        N = len(t)
-        if N - 2 * nh - 1 <= 0:
-            break
-
-        F_new, SS_new, df_new = mhaov_single_sigma(t, y, dy, period, nh=nh)
-
-        delta_SS  = SS_best - SS_new
-        extra_df  = 2
-        if SS_new <= 0 or df_new <= 0:
-            break
-
-        F_nested = (delta_SS / extra_df) / (SS_new / df_new)
-        p_nested = float(1.0 - f_dist.cdf(F_nested, extra_df, df_new))
-
-        if p_nested < f_pval_thresh:
-            F_best      = F_new
-            SS_best     = SS_new
-            df_best     = df_new
-            selected_nh = nh
-            was_upgraded = True
-        else:
-            break
-
-    return F_best, selected_nh, was_upgraded
+    """MHAOV F-statistic array over all trial periods."""
+    return np.array([mhaov_single(t, y, dy, p, nh) for p in test_periods])
 
 
 def mhaov_periodogram_adaptive(
@@ -1309,33 +523,124 @@ def mhaov_periodogram_adaptive(
     nh_max:        int   = 4,
     n_top_peaks:   int   = 10,
     f_pval_thresh: float = 0.10,
-) -> tuple:
-    """MHAOV periodogram with adaptive harmonic order selection."""
-    from scipy.signal import find_peaks as _find_peaks
+) -> Tuple[np.ndarray, float, float, int]:
+    """
+    MHAOV with adaptive harmonic order.
 
-    base_power = mhaov_periodogram(t, y, dy, test_periods, nh=nh_min)
+    Runs at nh_min, then checks whether upgrading NH improves the
+    F-statistic at the top peaks by a statistically significant margin.
 
-    peak_idxs, _ = _find_peaks(base_power, height=base_power.max() * 0.3)
-    if len(peak_idxs) == 0:
-        peak_idxs = np.array([np.argmax(base_power)])
+    Returns
+    -------
+    (power_array, best_period, best_F, chosen_nh)
+    """
+    pow_best = mhaov_periodogram(t, y, dy, test_periods, nh=nh_min)
+    best_nh  = nh_min
 
-    top_idxs = sorted(peak_idxs, key=lambda i: base_power[i], reverse=True)
-    top_idxs = top_idxs[:n_top_peaks]
+    top_idx = np.argsort(pow_best)[::-1][:n_top_peaks]
 
-    best_F      = -np.inf
-    best_period = test_periods[np.argmax(base_power)]
-    best_nh     = nh_min
+    for nh in range(nh_min + 1, nh_max + 1):
+        improved = False
+        for idx in top_idx:
+            p    = float(test_periods[idx])
+            f_lo = mhaov_single(t, y, dy, p, nh_min)
+            f_hi = mhaov_single(t, y, dy, p, nh)
+            df_extra = 2 * (nh - nh_min)
+            df_resid = max(len(t) - 2 * nh - 1, 1)
+            if f_lo <= 0 or df_resid <= 0:
+                continue
+            f_ratio = max((f_hi - f_lo) / df_extra * df_resid, 0.0)
+            pval    = float(1.0 - f_dist.cdf(f_ratio, df_extra, df_resid))
+            if pval < f_pval_thresh:
+                improved = True
+                break
+        if improved:
+            pow_best = mhaov_periodogram(t, y, dy, test_periods, nh=nh)
+            best_nh  = nh
 
-    for idx in top_idxs:
-        p = test_periods[idx]
-        F_adapt, nh_adapt, upgraded = mhaov_adaptive_period(
-            t, y, dy, p,
-            nh_min=nh_min, nh_max=nh_max,
-            f_pval_thresh=f_pval_thresh,
+    best_idx    = int(np.argmax(pow_best))
+    best_period = float(test_periods[best_idx])
+    best_F      = float(pow_best[best_idx])
+    return pow_best, best_period, best_F, best_nh
+
+
+# ── Conditional Entropy ───────────────────────────────────────────────────────
+
+def ce_single(
+    t:       np.ndarray,
+    y:       np.ndarray,
+    period:  float,
+    n_phase: int = 10,
+    n_mag:   int = 5,
+) -> float:
+    """CE score at a single trial period (lower = better phase coherence)."""
+    phase  = (t / period) % 1.0
+    p_bins = np.floor(phase * n_phase).astype(int) % n_phase
+    m_min, m_max = y.min(), y.max()
+    if m_max == m_min:
+        return 1.0
+    m_norm = (y - m_min) / (m_max - m_min)
+    m_bins = np.floor(m_norm * n_mag).astype(int).clip(0, n_mag - 1)
+
+    n  = len(t)
+    ce = 0.0
+    for pb in range(n_phase):
+        mask = p_bins == pb
+        n_p  = mask.sum()
+        if n_p == 0:
+            continue
+        for mb in range(n_mag):
+            n_pm = (mask & (m_bins == mb)).sum()
+            if n_pm == 0:
+                continue
+            p_pm         = n_pm / n
+            p_m_given_p  = n_pm / n_p
+            ce          += p_pm * np.log(p_m_given_p)
+
+    return -ce / (np.log(n_phase) + 1e-12)
+
+
+def ce_periodogram(
+    t:            np.ndarray,
+    y:            np.ndarray,
+    test_periods: np.ndarray,
+    n_phase: int = 10,
+    n_mag:   int = 5,
+) -> np.ndarray:
+    """CE score array over all trial periods."""
+    return np.array([ce_single(t, y, p, n_phase, n_mag) for p in test_periods])
+
+
+# ── Period agreement check ────────────────────────────────────────────────────
+
+def check_agreement(
+    p1:  float,
+    p2:  float,
+    p3:  float,
+    tol: float = 0.10,
+) -> Tuple[object, float]:
+    """
+    Check whether three period estimates agree within tolerance.
+    Checks harmonic ratios ×1, ×0.5, ×2 for each pair.
+
+    Returns
+    -------
+    (agrees, spread_pct)
+        agrees     : True | "two_of_three" | False
+        spread_pct : max fractional deviation from median
+    """
+    periods = np.array([p1, p2, p3])
+    med     = np.median(periods)
+    spread  = float(np.max(np.abs(periods - med) / (med + 1e-12)))
+
+    def _close(a, b):
+        return any(
+            abs(a - b * m) / (b * m + 1e-12) <= tol
+            for m in [1.0, 0.5, 2.0]
         )
-        if F_adapt > best_F:
-            best_F      = F_adapt
-            best_period = p
-            best_nh     = nh_adapt
 
-    return base_power, best_period, float(best_F), best_nh
+    if _close(p1, p2) and _close(p2, p3) and _close(p1, p3):
+        return True, spread
+    if _close(p1, p2) or _close(p2, p3) or _close(p1, p3):
+        return "two_of_three", spread
+    return False, spread
