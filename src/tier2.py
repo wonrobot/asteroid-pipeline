@@ -193,10 +193,8 @@ def run_tier2(
     logger.debug(f"{data.provid}: running MHAOV adaptive NH=2-4...")
     mhaov_pow, best_mhaov, F_best, best_nh = mhaov_periodogram_adaptive(
         data.t_hrs, data.y_dt, data.dy, test_periods,
-        nh_min=cfg_p.mhaov_nh, nh_max=4, n_top_peaks=10, f_pval_thresh=0.10,
+        nh_min=cfg_p.mhaov_nh,
     )
-    if best_nh > cfg_p.mhaov_nh:
-        logger.debug(f"{data.provid}: MHAOV upgraded NH={cfg_p.mhaov_nh}→{best_nh} at {best_mhaov:.3f}hr")
 
     df_model = 2 * cfg_p.mhaov_nh
     df_resid = data.n_obs - 2 * cfg_p.mhaov_nh - 1
@@ -520,48 +518,36 @@ def mhaov_periodogram_adaptive(
     dy:            np.ndarray,
     test_periods:  np.ndarray,
     nh_min:        int   = 2,
-    nh_max:        int   = 4,
-    n_top_peaks:   int   = 10,
-    f_pval_thresh: float = 0.10,
+    nh_max:        int   = 4,    # retained for API compatibility, not used
+    n_top_peaks:   int   = 10,   # retained for API compatibility, not used
+    f_pval_thresh: float = 0.10, # retained for API compatibility, not used
 ) -> Tuple[np.ndarray, float, float, int]:
     """
-    MHAOV with adaptive harmonic order.
+    MHAOV periodogram at fixed NH=2.
 
-    Runs at nh_min, then checks whether upgrading NH improves the
-    F-statistic at the top peaks by a statistically significant margin.
+    NH=2 uses 4 phase bins — sufficient to detect the standard
+    double-hump asteroid lightcurve and directly comparable to
+    MBLS Nterms=2. Both methods model the same harmonic complexity,
+    so their period agreement is physically meaningful.
+
+    Adaptive NH upgrade (NH=2→4) was removed because NH=4 (8 bins)
+    peaks at different periods than NH=2 (4 bins) for the same data.
+    Strong-signal objects (FAP≈0) almost always triggered the upgrade,
+    causing MHAOV to find a sub-harmonic that MBLS did not, which sent
+    30 correctly-detected objects to Tier 3 where they failed to publish.
+
+    The nh_max, n_top_peaks, f_pval_thresh parameters are retained for
+    API compatibility but have no effect.
 
     Returns
     -------
-    (power_array, best_period, best_F, chosen_nh)
+    (power_array, best_period, best_F, nh=2)
     """
-    pow_best = mhaov_periodogram(t, y, dy, test_periods, nh=nh_min)
-    best_nh  = nh_min
-
-    top_idx = np.argsort(pow_best)[::-1][:n_top_peaks]
-
-    for nh in range(nh_min + 1, nh_max + 1):
-        improved = False
-        for idx in top_idx:
-            p    = float(test_periods[idx])
-            f_lo = mhaov_single(t, y, dy, p, nh_min)
-            f_hi = mhaov_single(t, y, dy, p, nh)
-            df_extra = 2 * (nh - nh_min)
-            df_resid = max(len(t) - 2 * nh - 1, 1)
-            if f_lo <= 0 or df_resid <= 0:
-                continue
-            f_ratio = max((f_hi - f_lo) / df_extra * df_resid, 0.0)
-            pval    = float(1.0 - f_dist.cdf(f_ratio, df_extra, df_resid))
-            if pval < f_pval_thresh:
-                improved = True
-                break
-        if improved:
-            pow_best = mhaov_periodogram(t, y, dy, test_periods, nh=nh)
-            best_nh  = nh
-
+    pow_best    = mhaov_periodogram(t, y, dy, test_periods, nh=nh_min)
     best_idx    = int(np.argmax(pow_best))
     best_period = float(test_periods[best_idx])
     best_F      = float(pow_best[best_idx])
-    return pow_best, best_period, best_F, best_nh
+    return pow_best, best_period, best_F, nh_min
 
 
 # ── Conditional Entropy ───────────────────────────────────────────────────────
