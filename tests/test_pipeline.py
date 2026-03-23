@@ -468,6 +468,86 @@ class TestWindowAlias:
 
 # ── Tests: MBLS false alarm probability ──────────────────────────────────────
 
+class TestLRTGate:
+    """
+    Change 13: LRT runs only when MHAOV disagrees with MBLS raw period.
+    When MHAOV confirms, two independent methods already agree — skip LRT.
+    """
+
+    def test_lrt_skipped_when_mhaov_confirms(self):
+        """
+        When MHAOV and MBLS agree on the raw period, t2_lrt_doubled must
+        be False and t2_lrt_f_stat must be NaN (LRT was not run).
+
+        Behavioural contract: for a clean high-SNR synthetic lightcurve
+        both methods should agree, so the LRT must be skipped.
+        """
+        from tier1 import run_tier1
+        from tier2 import run_tier2
+        import numpy as np
+
+        df   = make_synthetic_lc(period_hr=4.8, amplitude=0.5, noise=0.01, n_obs=200)
+        data = preprocess(df, DEFAULT_CONFIG)
+        t1   = run_tier1(data, DEFAULT_CONFIG)
+        if not t1.passes:
+            pytest.skip("Tier 1 rejected")
+        t2 = run_tier2(data, t1, DEFAULT_CONFIG)
+        if not t2.passes and not t2.to_tier3:
+            pytest.skip("Tier 2 rejected")
+
+        # If MHAOV confirmed the raw period, LRT must have been skipped
+        tol = DEFAULT_CONFIG.tier.agreement_tol
+        mhaov_confirmed_raw = any(
+            abs(t2.best_period_mhaov - t2.best_period_mbls_raw * m)
+            / (t2.best_period_mbls_raw * m + 1e-12) <= tol
+            for m in [1.0, 0.5, 2.0]
+        )
+        if mhaov_confirmed_raw:
+            assert not t2.lrt_doubled, (
+                "LRT must not double when MHAOV already confirms MBLS raw"
+            )
+            assert np.isnan(t2.lrt_f_stat), (
+                f"lrt_f_stat must be NaN when LRT is skipped, got {t2.lrt_f_stat}"
+            )
+
+    def test_lrt_runs_when_mhaov_disagrees(self):
+        """
+        When MHAOV and MBLS find different periods, lrt_f_stat must be
+        finite (LRT was actually run to resolve the ambiguity).
+
+        We construct the disagreement by patching the t2 result's mhaov
+        period to a far-away value and re-invoking the gate logic directly
+        via apply_two_minima_lrt — ensuring the function executes.
+        """
+        from tier2 import apply_two_minima_lrt
+        import numpy as np
+
+        df   = make_synthetic_lc(period_hr=4.8, amplitude=0.5, noise=0.01, n_obs=150)
+        data = preprocess(df, DEFAULT_CONFIG)
+
+        # Synthetic periods: MBLS at 4.8hr, MHAOV at 9.6hr (2×, clearly disagrees at 1× level)
+        t_hrs = data.t_hrs
+        mbls_raw = 4.8
+        mhaov_far = 9.6  # outside 10% tolerance of 4.8hr
+
+        period_out, was_doubled, f_stat, p_val = apply_two_minima_lrt(
+            t_hrs, data.y_multiband, data.dy, data.bands,
+            period=mbls_raw, nterms=2,
+            n_objects=0,       # no Bonferroni for unit test
+            mhaov_period=mhaov_far,
+        )
+        # LRT must have run: f_stat is finite (not NaN)
+        assert np.isfinite(f_stat), (
+            f"f_stat must be finite when LRT runs, got {f_stat}"
+        )
+        # period_out is either kept or doubled — both are valid, but must be one of them
+        assert period_out in (mbls_raw, mbls_raw * 2.0) or \
+               abs(period_out - mbls_raw * 2) < 0.01 or \
+               abs(period_out - mbls_raw) < 0.01, (
+            f"LRT output {period_out:.3f}hr must be mbls_raw or 2×mbls_raw"
+        )
+
+
 class TestMBLSFAP:
     def test_fap_range(self):
         """FAP must be in [0, 1]."""

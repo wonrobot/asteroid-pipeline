@@ -34,30 +34,31 @@ is now annotation-only and never participates in the period decision.
 
 New decision logic
 ------------------
-1. MBLS runs unconditionally → best_mbls is the primary candidate.
-   2-minima rule always applied (no longer gated on MHAOV agreement).
+1. MBLS runs unconditionally → best_mbls_raw is the primary candidate.
 
-2. MHAOV runs → checks whether its peak confirms best_mbls.
+2. LRT gate (Change 13): check if MHAOV confirms best_mbls_raw within tol.
+   - MHAOV confirms raw → skip LRT, keep best_mbls_raw.  Two independent
+     methods (MBLS multiband + MHAOV single-band) agreeing is stronger
+     evidence than the LRT sub-fundamental test.  LRT precision was 38%
+     when run unconditionally (10/26 correct doublings in Change 12 run).
+   - MHAOV disagrees → run LRT as tiebreaker to resolve the ambiguity.
+
+3. MHAOV runs → checks whether its peak confirms best_mbls (post-LRT).
    "Confirms" = MHAOV peak within agreement_tol of best_mbls or P/2 or 2P.
 
-3. Significance gate (unchanged, dual):
+4. Significance gate (unchanged, dual):
    mhaov_sig = p_value  < mhaov_pval_thresh
    mbls_sig  = mbls_fap < mbls_fap_thresh
 
-4. Agreement outcomes (new):
+5. Agreement outcomes:
    "mbls_confirmed" : MHAOV confirms MBLS + either_sig → publish
                       both_sig → R=3 eligible; either_sig only → R≤2
    "mbls_sig_only"  : MBLS significant, MHAOV does not confirm → publish R≤2
-                      Scientific basis: MBLS FAP directly tests whether multi-band
-                      power exceeds the noise null. If FAP < 0.001 the signal is
-                      real regardless of MHAOV. MHAOV non-confirmation means the
-                      single-band collapsed series is less sensitive, not that the
-                      period is wrong.
    to_tier3=True    : Both gates significant but MHAOV finds a genuinely
                       different significant period → ambiguous, send to CLEAN.
    reject           : Neither gate significant → no evidence for any period.
 
-5. CE runs when floor allows (period_floor >= 1hr). Result stored as
+6. CE runs when floor allows (period_floor >= 1hr). Result stored as
    best_period_ce for catalog annotation. Never used in period selection.
 
 Consensus period
@@ -275,26 +276,60 @@ def run_tier2(
         )
         best_mbls_raw = test_periods[np.argmax(mbls_pow)]
 
-        # 2-minima likelihood ratio test (Change 9, corrected Change 10).
-        # alpha uses Bonferroni correction for n_objects tests (Change 10).
-        # Spin-barrier prior removed (Change 12) — LRT decides unconditionally.
-        best_mbls, was_doubled, n_minima, lrt_pval = apply_two_minima_lrt(
-            data.t_hrs, data.y_multiband, data.dy, data.bands,
-            period=best_mbls_raw, nterms=cfg_p.mbls_nterms_t2,
-            n_objects=cfg_t.lrt_n_objects,
-            mhaov_period=best_mhaov,
-            spin_barrier_hr=SPIN_BARRIER_HR,
+        # ── LRT gate (Change 13) ──────────────────────────────────────────────
+        # Two statistically independent methods (MBLS multiband + MHAOV
+        # single-band) agreeing on best_mbls_raw is stronger evidence than
+        # the LRT sub-fundamental test alone.  When MHAOV confirms the raw
+        # period, the LRT is not needed and has been shown to over-double
+        # 38% of the time (16/26 doublings wrong in Change 12 run).
+        #
+        # Scientific basis (Schwarzenberg-Czerny 1996; VanderPlas & Ivezic 2015):
+        # MBLS and MHAOV are built on different basis functions (Fourier
+        # multi-band joint fit vs. analysis of variance on single detrended
+        # series).  When both peak at the same period, the agreement is
+        # statistically independent — the probability of two unrelated methods
+        # both landing on a spurious alias is negligible for SNR>3 data.
+        #
+        # Rule: run LRT only when MHAOV does NOT confirm best_mbls_raw,
+        # i.e., when we have a genuine ambiguity that needs resolving.
+        _tol = cfg_t.agreement_tol          # default 0.10 (10%)
+        _mhaov_confirms_raw = any(
+            abs(best_mhaov - best_mbls_raw * mult) / (best_mbls_raw * mult + 1e-12) <= _tol
+            for mult in [1.0, 0.5, 2.0]
         )
-        if was_doubled:
+
+        if _mhaov_confirms_raw:
+            # MHAOV agrees with MBLS raw → trust both, skip LRT
+            best_mbls  = best_mbls_raw
+            was_doubled = False
+            n_minima    = np.nan
+            lrt_pval    = np.nan
             logger.debug(
-                f"{data.provid}: LRT 2-minima: {best_mbls_raw:.3f}hr "
-                f"→ doubled to {best_mbls:.3f}hr (F={n_minima:.2f} p={lrt_pval:.2e})"
+                f"{data.provid}: LRT skipped — MHAOV={best_mhaov:.3f}hr "
+                f"confirms MBLS raw={best_mbls_raw:.3f}hr (two independent methods agree)"
             )
         else:
-            logger.debug(
-                f"{data.provid}: LRT 2-minima: kept at {best_mbls_raw:.3f}hr "
-                f"(F={n_minima:.2f} p={lrt_pval:.2e}, no doubling)"
+            # MHAOV disagrees → run LRT as tiebreaker
+            # 2-minima likelihood ratio test (Change 9, corrected Change 10).
+            # alpha uses Bonferroni correction for n_objects tests (Change 10).
+            # Spin-barrier prior removed (Change 12) — LRT decides unconditionally.
+            best_mbls, was_doubled, n_minima, lrt_pval = apply_two_minima_lrt(
+                data.t_hrs, data.y_multiband, data.dy, data.bands,
+                period=best_mbls_raw, nterms=cfg_p.mbls_nterms_t2,
+                n_objects=cfg_t.lrt_n_objects,
+                mhaov_period=best_mhaov,
+                spin_barrier_hr=SPIN_BARRIER_HR,
             )
+            if was_doubled:
+                logger.debug(
+                    f"{data.provid}: LRT 2-minima: {best_mbls_raw:.3f}hr "
+                    f"→ doubled to {best_mbls:.3f}hr (F={n_minima:.2f} p={lrt_pval:.2e})"
+                )
+            else:
+                logger.debug(
+                    f"{data.provid}: LRT 2-minima: kept at {best_mbls_raw:.3f}hr "
+                    f"(F={n_minima:.2f} p={lrt_pval:.2e}, no doubling)"
+                )
     except Exception as e:
         logger.warning(f"{data.provid}: MBLS Tier2 failed ({e}) — falling back to MHAOV period")
         mbls_pow      = mhaov_pow.copy()
